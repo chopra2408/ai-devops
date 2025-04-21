@@ -1263,24 +1263,34 @@ class AIDevOpsAutomator:
         elif 'bitbucket.org' in repo_info:
             self.ci_platform = "Bitbucket Pipelines"; target_ci_path = 'bitbucket-pipelines.yml'
         else:
-            # Defaulting, but API commit won't work here unless self.is_github_repo is true
             if self.is_github_repo:
                 logger.warning("Unknown Git host, but assuming GitHub due to API client presence.");
                 self.ci_platform = "GitHub Actions"; target_ci_path = '.github/workflows/ai-devops-cicd.yml'
             else:
-                 # If using local clone, determine local path
                 self.ci_platform = "GitHub Actions" # Default for local fallback
                 workflow_dir = os.path.join(self.repo_path, '.github', 'workflows'); os.makedirs(workflow_dir, exist_ok=True);
                 target_ci_path = os.path.join(workflow_dir, 'ai-devops-cicd.yml') # Local path
                 logger.warning(f"Unknown Git host and not using GitHub API. Defaulting to GitHub Actions format locally at: {target_ci_path}")
 
-
         if not target_ci_path:
             logger.error("Could not determine CI/CD output file path."); return False
         logger.info(f"Targeting CI/CD Platform: {self.ci_platform}, Path: {target_ci_path}")
 
+
         resource_details_for_llm = self.selected_resource_details or self.created_resource_details
-        resource_details_for_llm.pop('type', None) # Remove internal type field if it exists
+        target_type = self.resource_configuration.get('type', 'unknown')
+        is_vm_like = target_type in ['ec2', 'vm']
+        
+        deploy_ip = resource_details_for_llm.get('public_ip', 'YOUR_SERVER_IP')
+        deploy_user = resource_details_for_llm.get('ssh_user') or resource_details_for_llm.get('admin_username', 'YOUR_SSH_USER')
+        artifact_name = "app.zip" # Consistent artifact name
+        ssh_secret_name = "DEPLOY_SSH_PRIVATE_KEY"
+        
+        if not is_vm_like:
+            deploy_ip = "N/A (Non-VM Target)"
+            deploy_user = "N/A (Non-VM Target)"
+
+        logger.info(f"Context for LLM: Stack={self.detected_stack}, Provider={self.cloud_provider}, Target={target_type}, IP={deploy_ip}, User={deploy_user}")
 
         # Ensure necessary keys exist in resource_details for LLM context, even if None
         if self.resource_configuration.get('type') in ['ec2', 'vm']:
@@ -1307,28 +1317,37 @@ class AIDevOpsAutomator:
 
         # --- Construct the Enhanced Prompt ---
         prompt = f"""
-        You are a DevOps engineer tasked with generating a CI/CD pipeline configuration in YAML format for {self.ci_platform}. The pipeline should be tailored to the detected technology stack: {self.detected_stack}.
+        Generate a CI/CD pipeline configuration in YAML format for {self.ci_platform}.
+        The pipeline should build, test, and **automatically deploy** the application artifact to the target server using SSH/SCP.
 
-        Context:
+        **Context:**
         - Repository URL: {self.repo_url}
-        - Cloud provider: {self.cloud_provider}
-        - Deployment target: {self.resource_configuration['type']}
-        - Server IP: {self.created_resource_details.get('public_ip', 'VM_PUBLIC_IP')}
-        - SSH username: {self.created_resource_details.get('ssh_user', 'ubuntu')}
-        - Build artifact name: app.zip
+        - Detected Technology Stack: {self.detected_stack}
+        - Cloud Provider: {self.cloud_provider}
+        - Deployment Target Type: {target_type}
+        - **Deployment Server IP:** {deploy_ip}
+        - **Deployment SSH User:** {deploy_user}
+        - **CI/CD Secret Name for SSH Key:** {ssh_secret_name} (This secret must contain the private SSH key and be configured in the CI/CD platform settings)
+        - **Build Artifact Name:** {artifact_name}
+        - **Assumed Deployment Script on Server:** `~/deploy.sh` (This script should exist in the user's home directory on the server and handle unpacking {artifact_name}, installing dependencies, and restarting the application)
 
-        Requirements:
-        - Use appropriate build and test commands for the technology stack {self.detected_stack}.
-        - Archive the build output into app.zip.
-        - Upload the artifact for the user to download.
-        - Include a step that outputs manual deployment instructions for the user to run locally using their SSH key.
-        - The deployment instructions should guide the user to:
-        1. Download the artifact app.zip.
-        2. SCP the artifact to the server: scp -i /path/to/your_key.pem app.zip {self.created_resource_details.get('ssh_user', 'ubuntu')}@{self.created_resource_details.get('public_ip', 'VM_PUBLIC_IP')}:~/
-        3. SSH into the server and run deployment commands: ssh -i /path/to/your_key.pem {self.created_resource_details.get('ssh_user', 'ubuntu')}@{self.created_resource_details.get('public_ip', 'VM_PUBLIC_IP')} "cd ~ && unzip app.zip && ./deploy.sh"
-        - Assume there is a deploy.sh script in the repository that handles the deployment on the server.
+        **Pipeline Requirements:**
+        1.  **Trigger:** Configure the pipeline to run on pushes to the `main` or `master` branch.
+        2.  **Checkout:** Check out the repository code.
+        3.  **Setup Environment:** Set up the necessary runtime environment for the `{self.detected_stack}` stack (e.g., Node.js version, Python version, Java JDK). Use common versions if not specified.
+        4.  **Install Dependencies:** Run standard commands to install project dependencies (e.g., `npm install`, `pip install -r requirements.txt`, `mvn install`).
+        5.  **Build (if applicable):** Run standard build commands (e.g., `npm run build`, `mvn package`). Skip if not typical for the stack (like basic Python/Node scripts).
+        6.  **Test (Optional Placeholder):** Include a placeholder step for running tests (e.g., `npm test`, `python -m unittest`). It's okay if it just echoes a message if specific commands aren't known.
+        7.  **Archive:** Create a deployment artifact named `{artifact_name}` containing the necessary files to run the application (e.g., built files, scripts, package.json, requirements.txt, but NOT node_modules or virtualenvs).
+        8.  **Deploy (Only if target is VM-like: {is_vm_like}):**
+            -   **Condition:** This step should ideally only run if the target type is VM-like (EC2, Azure VM, GCP VM). If not, skip this step gracefully.
+            -   **Add SSH Key:** Securely load the private key from the `{ssh_secret_name}` secret into the SSH agent or a temporary file recognized by SSH/SCP commands. Handle permissions correctly (chmod 600).
+            -   **SCP Artifact:** Use `scp` to copy the `{artifact_name}` to the server's home directory (`~`). Use appropriate flags like `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` for simplicity in a CI environment (acknowledge security implications if possible in comments).
+            -   **Execute Remote Script:** Use `ssh` to connect to the server (using the loaded key, user `{deploy_user}`, and IP `{deploy_ip}`) and execute the deployment script: `bash ~/deploy.sh`. Again, use appropriate flags like `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`.
+        9.  **Platform Specifics:** Use syntax and recommended actions/plugins appropriate for `{self.ci_platform}` (e.g., `actions/checkout@v3`, `actions/setup-node@v3`, `${{{{ secrets.{ssh_secret_name} }}}}` for GitHub Actions).
 
-        Generate only the YAML configuration for the CI/CD pipeline, ensuring it is complete and valid.
+        **Output:**
+        Generate **only** the complete and valid YAML configuration content. Do not include any explanations, markdown formatting (like ```yaml), or introductory sentences outside the YAML structure itself.
         """
 
 # logger.debug(f"Refined LLM Prompt (Truncated):\n{prompt[:800]}...") # Optional: Log more of the prompt if needed
@@ -1340,9 +1359,9 @@ class AIDevOpsAutomator:
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o", # Or gpt-4 if available/needed
                 messages=[
-                    {"role": "system", "content": f"You are a DevOps assistant generating {self.ci_platform} YAML configuration with detailed deployment steps."},
+                    {"role": "system", "content": f"You are a DevOps assistant generating {self.ci_platform} YAML configuration for automated application deployment to a server via SSH/SCP."},
                     {"role": "user", "content": prompt}],
-                temperature=0.3
+                temperature=0.2
             )
             generated_text = response.choices[0].message.content
             logger.debug("LLM Raw Response received.")
@@ -1353,72 +1372,112 @@ class AIDevOpsAutomator:
                 start = generated_text.find(yaml_start_marker) + len(yaml_start_marker)
                 end = generated_text.find(yaml_end_marker, start)
                 yaml_content = generated_text[start:end].strip() if end != -1 else generated_text[start:].strip()
-            elif generated_text.strip().startswith(('name:', 'image:', 'stages:', 'pipelines:', 'on:')): # Added 'on:' for GitHub
+            elif generated_text.strip().startswith(('name:', 'image:', 'jobs', 'stages:', 'pipelines:', 'on:')): # Added 'on:' for GitHub
                 yaml_content = generated_text.strip()
+                logger.debug("Assuming raw respone is YAML content.")
+            
+            else:
+                # Fallback: look for yaml-like indentation at the start
+                 lines = generated_text.strip().splitlines()
+                 if lines and (lines[0].startswith(' ') or ':' in lines[0]):
+                     logger.debug("Attempting to treat raw response as YAML due to indentation/structure.")
+                     yaml_content = generated_text.strip()
 
             if not yaml_content:
                 logger.error("LLM did not return recognizable YAML content."); return False
             try:
-                yaml.safe_load(yaml_content) # Basic validation
+                yaml.safe_load(yaml_content)
                 logger.info("Generated YAML syntax appears valid.")
             except yaml.YAMLError as e:
-                logger.error(f"Generated content is not valid YAML: {e}\n--- Content ---\n{yaml_content}\n---------------"); return False
-                
+                logger.error(f"Generated content is not valid YAML: {e}\n--- Content Start ---\n{yaml_content}\n--- Content End ---")
+                return False
             # --- Commit or Save ---
             
+            commit_message = "feat: Add AI-generated CI/CD pipeline for automated deployment"
             if self.is_github_repo:
-                commit_message = "feat: Add AI-generated CI/CD configuration"
                 if not self._commit_file_via_api(target_ci_path, yaml_content, commit_message):
-                    logger.error("Failed to commit CI/CD config via API.")
+                    logger.error("Failed to commit automated CI/CD config via API.")
                     return False
+                self.commit_pushed = True
             else:
                 # Existing local save logic...
                 try:
                     local_dir = os.path.dirname(target_ci_path)
-                    if local_dir:
-                        os.makedirs(local_dir, exist_ok=True)
-                    with open(target_ci_path, 'w') as f:
-                        f.write(yaml_content)
-                    logger.info(f"Generated CI/CD configuration saved locally to: {target_ci_path}")
-                    self._add_keys_to_gitignore_local()
+                    if local_dir: os.makedirs(local_dir, exist_ok=True)
+                    with open(target_ci_path, 'w') as f: f.write(yaml_content)
+                    logger.info(f"Generated automated CI/CD configuration saved locally to: {target_ci_path}")
+                    self._add_keys_to_gitignore_local() # Ensure keys are ignored before potential commit
+                    # Note: self.commit_pushed is handled later by commit_and_push_local_changes
                 except Exception as e:
-                    logger.error(f"Failed to save CI/CD config locally: {e}", exc_info=True)
+                    logger.error(f"Failed to save automated CI/CD config locally: {e}", exc_info=True)
                     return False
 
             # New code to automate secret setup for GitHub Actions
             if self.is_github_repo and self.ssh_key_paths.get('private'):
                 try:
+                    # Check if PyNaCl is available before proceeding
+                    if nacl is None:
+                         raise ImportError("PyNaCl not installed.")
+
                     repo = self.repo_object
+                    # Check if secret already exists (optional but good practice)
+                    try:
+                        repo.get_secret(ssh_secret_name)
+                        logger.info(f"Secret '{ssh_secret_name}' already exists. Skipping creation.")
+                        self.ssh_key_secret_set = True # Assume it's set correctly
+                        return True # Skip the rest of the secret setting
+                    except UnknownObjectException:
+                        logger.info(f"Secret '{ssh_secret_name}' not found. Proceeding to create it.")
+                    except GithubException as ge:
+                         # Handle potential permission errors during check
+                         if ge.status == 404: # Expected if secret doesn't exist
+                              logger.info(f"Secret '{ssh_secret_name}' not found (via check). Proceeding to create it.")
+                         else:
+                              logger.warning(f"Could not check for existing secret '{ssh_secret_name}': {ge}. Attempting creation anyway.")
+
                     # Get the repository's public key for encryption
-                    public_key_response = self.github_client.get(f"/repos/{repo.full_name}/actions/secrets/public-key")
-                    public_key_data = public_key_response.json()
+                    # Corrected: Use the authenticated PyGithub client's request method
+                    # Make sure to handle potential JSON parsing errors
+                    response = self.github_client.requester.requestJsonAndCheck("GET", f"/repos/{repo.full_name}/actions/secrets/public-key")
+                    public_key_data = response[1] # [status_code, data]
                     key_id = public_key_data['key_id']
-                    public_key = public_key_data['key']
+                    public_key_b64 = public_key_data['key']
 
                     # Encrypt the private key content
-                    pub_key = PublicKey(public_key, encoder=Base64Encoder)
+                    pub_key = PublicKey(public_key_b64, encoder=Base64Encoder)
                     sealed_box = SealedBox(pub_key)
                     with open(self.ssh_key_paths['private'], 'rb') as f:
                         private_key_content = f.read()
-                    encrypted = sealed_box.encrypt(private_key_content, encoder=Base64Encoder)
-                    encrypted_value = encrypted.decode('utf-8')
+
+                    encrypted = sealed_box.encrypt(private_key_content) # Encrypt raw bytes
+                    encrypted_value_b64 = Base64Encoder.encode(encrypted).decode('utf-8') # Encode result to Base64 string
 
                     # Set the secret via GitHub API
                     secret_data = {
-                        "encrypted_value": encrypted_value,
+                        "encrypted_value": encrypted_value_b64,
                         "key_id": key_id
                     }
-                    self.github_client.put(
-                        f"/repos/{repo.full_name}/actions/secrets/DEPLOY_SSH_PRIVATE_KEY",
-                        json=secret_data
-                    )
-                    logger.info("Successfully set DEPLOY_SSH_PRIVATE_KEY secret via GitHub API.")
+                    # Use the authenticated PyGithub client's request method
+                    self.github_client.requester.requestJsonAndCheck(
+                         "PUT",
+                         f"/repos/{repo.full_name}/actions/secrets/{ssh_secret_name}",
+                         input=secret_data # Use 'input' for PUT body with requester
+                     )
+                    logger.info(f"Successfully set '{ssh_secret_name}' secret via GitHub API.")
                     self.ssh_key_secret_set = True
                 except ImportError:
-                    logger.warning("PyNaCl not installed. Skipping automatic SSH key secret setup. Please set DEPLOY_SSH_PRIVATE_KEY manually.")
+                    logger.warning(f"PyNaCl not installed (`pip install pynacl`). Skipping automatic SSH key secret setup. Please set {ssh_secret_name} manually in GitHub secrets.")
+                    self.ssh_key_secret_set = False # Explicitly false
+                except GithubException as e:
+                    logger.error(f"GitHub API error setting secret '{ssh_secret_name}': {e.status} - {e.data}", exc_info=True)
+                    logger.error("Ensure the PAT has 'repo' scope and Actions secrets write permissions.")
+                    self.ssh_key_secret_set = False # Explicitly false
                 except Exception as e:
-                    logger.error(f"Failed to set DEPLOY_SSH_PRIVATE_KEY secret: {e}", exc_info=True)
-                    self.ssh_key_secret_set = False
+                    logger.error(f"Failed to set {ssh_secret_name} secret: {e}", exc_info=True)
+                    self.ssh_key_secret_set = False # Explicitly false
+            elif not is_vm_like:
+                 logger.info(f"Target type '{target_type}' does not require SSH key secret. Skipping automatic setup.")
+
 
             return True
 
@@ -1427,7 +1486,7 @@ class AIDevOpsAutomator:
         except openai.AuthenticationError as e: logger.error(f"OpenAI Auth Error: {e}"); return False
         except openai.RateLimitError as e: logger.error(f"OpenAI Rate Limit Error: {e}"); return False
         except Exception as e: logger.error(f"LLM interaction error: {e}", exc_info=True); return False
-
+        
     # --- Git Commit ---
     def _commit_file_via_api(self, file_path: str, content: str, message: str) -> bool:
         """Commits a file to the GitHub repository using the API."""
@@ -1565,133 +1624,131 @@ class AIDevOpsAutomator:
 
     # --- Setup Instructions ---
         # --- Setup Instructions ---
+        # --- Setup Instructions ---
     def generate_setup_instructions(self) -> str:
-        """Generates instructions focusing on using the local PEM key."""
-        instructions = ["# AI DevOps Setup & Manual Deployment Instructions\n"]
+        """Generates instructions focusing on CI/CD setup and manual fallbacks."""
+        instructions = ["# AI DevOps Setup & Deployment Instructions\n"]
 
         resource_info = self.created_resource_details or self.selected_resource_details
-        is_vm_target = resource_info.get('type', '').lower().endswith('vm') or \
-                       resource_info.get('type', '').lower().endswith('ec2 instance') # Check if it's a VM type
+        target_type = self.resource_configuration.get('type', 'unknown')
+        is_vm_like = target_type in ['ec2', 'vm'] # Check if it's a VM type requiring SSH/SCP
+        ssh_secret_name = "DEPLOY_SSH_PRIVATE_KEY" # Standardized secret name
 
-        # --- Section 1: General Info ---
+        # --- Section 1: Overview ---
         instructions.append("## 1. Overview")
-        instructions.append("- This tool has configured cloud infrastructure and potentially a CI/CD pipeline.")
-        if self.ci_platform and self.commit_pushed:
-            instructions.append(f"- A basic {self.ci_platform} pipeline configuration was generated and committed.")
-            instructions.append("  - **Important:** If deploying to a VM via CI/CD, you MUST configure the `DEPLOY_SSH_PRIVATE_KEY` secret in your CI/CD provider settings for the pipeline to work.")
-            if self.ssh_key_secret_set:
-                 instructions.append("  - ✅ The script attempted to set the `DEPLOY_SSH_PRIVATE_KEY` secret automatically via the GitHub API.")
-            elif self.is_github_repo and is_vm_target and not self.ssh_key_secret_set:
-                 instructions.append("  - ⚠️ The script could **not** automatically set the `DEPLOY_SSH_PRIVATE_KEY` secret (requires PyNaCl or encountered an API error). You need to set it manually in your GitHub repository secrets.")
+        instructions.append("- This tool has configured cloud infrastructure and generated a CI/CD pipeline configuration.")
 
-        elif self.ci_platform and not self.is_github_repo and not self.commit_pushed:
-             instructions.append(f"- A basic {self.ci_platform} pipeline configuration was generated locally but **not pushed**.")
-             local_ci_path = '.github/workflows/ai-devops-cicd.yml' # Adjust if other platforms supported locally
-             instructions.append(f"  - Review the generated file (`{local_ci_path}`) in the temporary directory (if not cleaned up) or your local clone.")
-             instructions.append(f"  - Manually commit and push `{local_ci_path}` and `.gitignore`.")
-             if is_vm_target:
-                instructions.append("  - If using the generated pipeline, configure the `DEPLOY_SSH_PRIVATE_KEY` secret in your CI/CD provider.")
+        commit_status = "committed to your repository" if self.commit_pushed else "saved locally (needs manual commit/push)"
+        if self.ci_platform:
+            instructions.append(f"- A basic {self.ci_platform} pipeline configuration (`{'.github/workflows/ai-devops-cicd.yml' or '.gitlab-ci.yml' or 'bitbucket-pipelines.yml'}`) was generated and {commit_status}.")
+            if is_vm_like:
+                 instructions.append(f"  - **Goal:** This pipeline aims to **automatically deploy** your application to the target server ({target_type}) on pushes to the main/master branch.")
+                 instructions.append(f"  - **ACTION REQUIRED for Automation:** For automatic deployment to work, you **MUST** configure the `{ssh_secret_name}` secret in your CI/CD provider settings (e.g., GitHub Repository Secrets).")
+                 instructions.append(f"    - The value of this secret must be the **entire content** of the private SSH key (`.pem` file) required to access the server.")
 
-        instructions.append("- Ensure you have an SSH client installed locally.")
+                 # Report on automatic secret setting attempt
+                 if self.is_github_repo and self.ssh_key_paths.get('private'): # Check if script *should* have tried
+                      if self.ssh_key_secret_set:
+                           instructions.append(f"    - ✅ The script **successfully attempted** to set the `{ssh_secret_name}` secret automatically via the GitHub API using the generated key.")
+                           instructions.append(f"    - Verify this secret in your repository's Settings > Secrets and variables > Actions.")
+                      else:
+                           instructions.append(f"    - ⚠️ The script **could not** automatically set the `{ssh_secret_name}` secret (requires PyNaCl library, PAT permissions, or encountered an API error).")
+                           instructions.append(f"    - **You MUST set the `{ssh_secret_name}` secret manually.**")
+                 elif is_vm_like: # VM-like target, but maybe existing VM or non-GitHub
+                      instructions.append(f"    - **You MUST set the `{ssh_secret_name}` secret manually.**")
 
-        # --- Section 2: SSH Key Details ---
-        private_key_path = 'C:\\Users\\Nishant Chopra\\Desktop\\devops-ai\\ai-devops-ec2-key.pem'
+            else:
+                 instructions.append(f"  - This pipeline is configured for the `{target_type}` target. Deployment steps may vary based on the specific service (e.g., Lambda update, ECS service update). Review the generated YAML.")
+
+        else:
+             instructions.append("- CI/CD configuration generation was skipped or failed.")
+
+        if not self.commit_pushed and self.ci_platform:
+            instructions.append(f"- **Manual Action:** Since changes were not pushed, manually review, commit, and push the generated CI/CD file and any `.gitignore` changes.")
+
+        instructions.append("- You may need a local SSH client for manual access or troubleshooting.")
+
+        # --- Section 2: SSH Key Details (Important for Manual Access & Secret Value) ---
+        private_key_path_generated = self.ssh_key_paths.get('private')
+        private_key_path_display = "N/A"
         public_key_path_display = "N/A"
-        key_name_base = "ai-devops-key" # Default base
+        key_source_info = ""
 
-        if self.ssh_key_paths.get('private'):
+        if private_key_path_generated:
             # Key was generated by the script for a NEW resource
-            private_key_path = self.ssh_key_paths['private']
-            public_key_path_display = self.ssh_key_paths.get('public', f"{private_key_path}.pub")
-            # Extract base name if possible
-            key_name_base = os.path.basename(private_key_path).replace(".pem", "")
-            instructions.append("\n## 2. SSH Key Details (Generated)")
+            private_key_path_display = private_key_path_generated
+            public_key_path_display = self.ssh_key_paths.get('public', f"{private_key_path_display}.pub")
+            key_source_info = "(Generated by Script)"
+            instructions.append("\n## 2. SSH Key Details " + key_source_info)
             instructions.append(f"- An SSH key pair was generated for accessing the **newly created** resource.")
-            instructions.append(f"  - **Private Key File:** `{private_key_path}` (Located in the script's directory)")
+            instructions.append(f"  - **Private Key File:** `{private_key_path_display}` (Located in the script's directory)")
             instructions.append(f"  - **Public Key File:** `{public_key_path_display}`")
-            instructions.append(f"  - **Key Name in Cloud:** `{self.ssh_key_paths.get('key_name', key_name_base)}` (AWS) or associated during VM creation (Azure/GCP).")
-            instructions.append(f"  - 🔐 **IMPORTANT:** Keep the private key file (`{os.path.basename(private_key_path)}`) secure. **Do not commit it to Git.**")
-            instructions.append(f"  - The script automatically added `{os.path.basename(private_key_path)}` to `.gitignore` (if modified locally).")
-        elif is_vm_target:
-            # Existing VM was selected
-            instructions.append("\n## 2. SSH Key Details (Existing VM)")
-            instructions.append("- You selected an existing VM. You must use the private key that corresponds to the public key already authorized on that VM.")
-            instructions.append("- The script did **not** generate or manage keys for existing VMs.")
-            instructions.append(f"- **Action Required:** Locate your existing private key file for this VM.")
-            private_key_path = "ai-devops-ec2-key.pem" # Placeholder for user
+            key_name_in_cloud = self.ssh_key_paths.get('key_name', os.path.basename(private_key_path_display).replace('.pem',''))
+            instructions.append(f"  - **Key Name Reference:** `{key_name_in_cloud}` (Used during resource creation).")
+            instructions.append(f"  - 🔐 **IMPORTANT:** Keep the private key file (`{os.path.basename(private_key_path_display)}`) secure. **Do not commit it to Git.**")
+            instructions.append(f"  - The script attempted to add `{os.path.basename(private_key_path_display)}` to `.gitignore` {commit_status}.")
+            instructions.append(f"  - **Use the content of this private key file** when setting the `{ssh_secret_name}` secret in your CI/CD platform.")
+        elif is_vm_like:
+            # Existing VM was selected OR key wasn't generated by this script run
+            instructions.append("\n## 2. SSH Key Details (Existing VM / Manual Key)")
+            instructions.append("- You selected an existing VM or the key was not generated by this script run.")
+            instructions.append("- You must use the **correct existing private key** that corresponds to the public key already authorized on that VM.")
+            instructions.append(f"- **Action Required:** Locate your existing private key file.")
+            private_key_path_display = "/path/to/your/existing_private_key.pem" # Placeholder
+            instructions.append(f"- **Use the content of this existing private key file** when setting the `{ssh_secret_name}` secret in your CI/CD platform.")
 
-        # --- Section 3: Manual Access & Deployment (Using Local Key) ---
-        if is_vm_target and private_key_path:
-            instructions.append("\n## 3. Manual VM Access & Deployment (Using Local Key)")
-            ssh_user = resource_info.get('ssh_user') or resource_info.get('admin_username', 'default_user') # Get user
-            public_ip = resource_info.get('public_ip', 'VM_PUBLIC_IP_ADDRESS') # Get IP
 
-            if public_ip == 'N/A' or public_ip == 'VM_PUBLIC_IP_ADDRESS' or not public_ip:
-                 instructions.append("- ⚠️ Could not determine the Public IP address automatically. Please find it in your cloud provider console.")
-                 public_ip = "VM_PUBLIC_IP_ADDRESS" # Reset placeholder
+        # --- Section 3: Triggering Deployment & Manual Fallback ---
+        instructions.append("\n## 3. Deployment")
+        instructions.append("\n### 3.1 Automated Deployment (Recommended)")
+        instructions.append(f"1.  **Ensure Secret is Set:** Verify the `{ssh_secret_name}` secret is correctly configured in your CI/CD platform (see Section 1).")
+        if not self.commit_pushed and self.ci_platform:
+                     target_ci_path = target_ci_path if 'target_ci_path' in locals() else 'pipeline.yml'
+                     instructions.append(f"2.  **Push Changes:** Manually commit and push the CI/CD configuration file (`{target_ci_path}`) and any other changes to your `main` or `master` branch.")
+        else:
+            instructions.append(f"2.  **Trigger Pipeline:** Push a commit to your `main` or `master` branch.")
+        instructions.append(f"3.  **Monitor Pipeline:** Check the execution status and logs in your {self.ci_platform} interface.")
 
-            if ssh_user == 'default_user':
-                 instructions.append("- ⚠️ Could not determine the SSH username automatically. Common defaults are:")
-                 instructions.append("  - AWS EC2 (Ubuntu): `ubuntu`")
-                 instructions.append("  - AWS EC2 (Amazon Linux): `ec2-user`")
-                 instructions.append("  - Azure VM (Default): `azureuser`")
-                 instructions.append("  - GCP VM (Default): Username depends on image/OS Login setup.")
-                 ssh_user = "correct_ssh_username" # Placeholder
+        if is_vm_like:
+            instructions.append("\n### 3.2 Manual Deployment (Fallback / Testing)")
+            instructions.append("If automated deployment fails or you need to deploy manually:")
+            ssh_user = resource_info.get('ssh_user') or resource_info.get('admin_username', 'YOUR_SSH_USER')
+            public_ip = resource_info.get('public_ip', 'YOUR_SERVER_IP')
 
-            instructions.append("\nFollow these steps to connect and deploy manually from your local machine:")
-            instructions.append(f"1.  **Locate Your Private Key:** Ensure you have the correct private key file:")
-            instructions.append(f"    - If generated by this script: `{private_key_path}`")
-            instructions.append(f"    - If using an existing VM: `{private_key_path}` (Replace with your actual key file path)")
-            instructions.append(f"2.  **(Recommended First Time) Set Permissions:** On Linux/macOS, restrict key permissions:")
+            if public_ip == 'N/A' or public_ip == 'YOUR_SERVER_IP' or not public_ip:
+                 instructions.append("- ⚠️ Could not determine the Public IP address. Find it in your cloud provider console.")
+                 public_ip = "YOUR_SERVER_IP" # Reset placeholder
+            if ssh_user == 'N/A' or ssh_user == 'YOUR_SSH_USER' or not ssh_user:
+                 instructions.append("- ⚠️ Could not determine the SSH username. Common defaults: `ubuntu`, `ec2-user` (AWS), `azureuser` (Azure). Find the correct one.")
+                 ssh_user = "YOUR_SSH_USER" # Reset placeholder
+
+            instructions.append(f"1.  **Locate Your Private Key:** `{private_key_path_display}` (Replace with your actual key path).")
+            instructions.append(f"2.  **(Optional) Set Permissions:** On Linux/macOS: `chmod 600 {private_key_path_display}`")
+            instructions.append(f"3.  **Build Artifact:** Create the deployment artifact locally (e.g., `app.zip` containing your application files). The exact steps depend on your stack.")
+            instructions.append(f"4.  **Copy Artifact:** Use `scp`:")
             instructions.append(f"    ```bash")
-            instructions.append(f"    chmod 600 {private_key_path}")
+            instructions.append(f"    scp -i {private_key_path_display} ./app.zip {ssh_user}@{public_ip}:~/")
             instructions.append(f"    ```")
-            instructions.append(f"3.  **Test SSH Connection:**")
+            instructions.append(f"5.  **SSH and Deploy:** Connect and run deployment steps:")
             instructions.append(f"    ```bash")
-            instructions.append(f"    ssh -i {private_key_path} {ssh_user}@{public_ip}")
+            instructions.append(f"    ssh -i {private_key_path_display} {ssh_user}@{public_ip} 'bash ~/deploy.sh'")
             instructions.append(f"    ```")
-            instructions.append(f"    - If connection fails, double-check the IP address, username, key file path, and security group/firewall rules (ensure port 22 is open).")
-            instructions.append(f"4.  **Deploy Your Application (Example):**")
-            instructions.append(f"    - Use `scp` to copy your application files/artifacts to the VM:")
-            instructions.append(f"      ```bash")
-            instructions.append(f"      # Example: Copy a zip file from your current directory")
-            instructions.append(f"      scp -i {private_key_path} ./your_app_artifact.zip {ssh_user}@{public_ip}:~/")
-            instructions.append(f"      ```")
-            instructions.append(f"    - Use `ssh` to run commands remotely on the VM (e.g., unpack, install, restart):")
-            instructions.append(f"      ```bash")
-            instructions.append(f"      # Example: Unzip and run a deployment script")
-            instructions.append(f"      ssh -i {private_key_path} {ssh_user}@{public_ip} << EOF")
-            instructions.append(f"      cd ~")
-            instructions.append(f"      unzip -o your_app_artifact.zip -d /path/to/your/app")
-            instructions.append(f"      cd /path/to/your/app")
-            instructions.append(f"      # Add commands: install dependencies (npm install, pip install), run migrations, restart service (systemctl restart, pm2 reload), etc.")
-            instructions.append(f"      echo 'Deployment commands executed.'" )
-            instructions.append(f"      EOF")
-            instructions.append(f"      ```")
-            instructions.append(f"    - **Adapt these `scp` and `ssh` commands** to your specific application structure and deployment process.")
+            instructions.append(f"    (Ensure `~/deploy.sh` exists on the server and does what's needed).")
 
         # --- Section 4: Next Steps ---
-        instructions.append("\n## 4. Next Steps")
-        if self.ci_platform and self.commit_pushed:
-             instructions.append("- **Monitor CI/CD:** If you configured the necessary secrets, push a change to your `main`/`master` branch to trigger the automated pipeline.")
-             instructions.append(f"- **Review Pipeline:** Check the generated workflow file (`{'.github/workflows/ai-devops-cicd.yml'}`) for details and adjust if needed.") # Assuming target_ci_path is set
-        elif self.ci_platform:
-             instructions.append("- **Push CI/CD Config:** Manually commit and push the generated CI/CD file if you haven't already.")
-             instructions.append("- **Configure Secrets:** Set up required secrets (cloud credentials, SSH key if needed) in your CI/CD provider.")
-             instructions.append("- **Trigger Pipeline:** Push a change to `main`/`master` to run the pipeline.")
-
-        if not is_vm_target:
-            instructions.append(f"- **Check Deployment Target:** Review the status of your '{resource_info.get('type', 'resource')}' named '{resource_info.get('name', 'N/A')}' in the {self.cloud_provider.upper()} console.")
-            if resource_info.get('type', '').lower() == 'aws lambda function':
-                 instructions.append("- Test your Lambda function via the AWS console or AWS CLI.")
-            elif resource_info.get('type', '').lower() == 'aws ecs cluster':
-                 instructions.append("- You may need to manually create an ECS Service and Task Definition, or adapt the generated CI/CD pipeline to do so.")
-            # Add instructions for other non-VM types if needed
-
-        instructions.append("- **Consult Logs:** Check CI/CD pipeline logs and cloud provider logs for any deployment issues.")
+        instructions.append("\n## 4. Next Steps & Troubleshooting")
+        instructions.append("- **Create `deploy.sh`:** If you haven't already, create the `deploy.sh` script in the home directory (`~/`) on your target server. This script should handle:")
+        instructions.append("  - Unpacking the artifact (e.g., `unzip -o app.zip -d /path/to/app`)")
+        instructions.append("  - Navigating to the application directory (`cd /path/to/app`)")
+        instructions.append("  - Installing/updating dependencies (e.g., `npm install --production`, `pip install -r requirements.txt`)")
+        instructions.append("  - Building if necessary (e.g., `npm run build`)")
+        instructions.append("  - Restarting your application (e.g., `pm2 reload app_name`, `systemctl restart your_service`)")
+        instructions.append("- **Check Pipeline Logs:** Carefully review the CI/CD pipeline logs for any errors during build or deployment steps.")
+        instructions.append("- **Check Server Logs:** If deployment succeeds but the app doesn't work, check application logs on the server.")
+        if not is_vm_like and target_type != 'unknown':
+            instructions.append(f"- **Consult Cloud Provider Docs:** Review documentation for deploying to {self.cloud_provider.upper()} {target_type} if the generated pipeline needs adjustments.")
 
         return "\n".join(instructions)
-
     # --- Cleanup ---
     def cleanup(self):
         """Cleans up the temporary local repository if it was created."""
