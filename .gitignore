@@ -11,3 +11,4 @@ wheels/
 .env
 ai-devops-ec2-key.pem
 ai-devops-ec2-key.pub
+backend

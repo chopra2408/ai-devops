@@ -1,6 +1,5 @@
-# --- START OF FILE main.py ---
 import os
-import getpass # Keep for potential fallback, though not used by API directly
+import getpass  
 import yaml
 import tempfile
 import json
@@ -12,15 +11,10 @@ import stat
 import time
 import uuid
 import asyncio
-
-# --- FastAPI Imports ---
 from fastapi import FastAPI, HTTPException, Body, Path
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 from enum import Enum
-
-# --- Cloud SDK Imports ---
-# (Keep all Cloud SDK and Cryptography imports as they were)
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 import azure.identity
@@ -28,18 +22,14 @@ import azure.mgmt.resource
 import azure.mgmt.compute
 import azure.mgmt.network
 from azure.core.exceptions import ResourceNotFoundError as AzureResourceNotFoundError
-# Correct Google imports
 from google.cloud import compute_v1
 from google.oauth2 import service_account
-import google.auth # Explicitly import google.auth
-import google.auth.exceptions # Import exceptions submodule
+import google.auth 
+import google.auth.exceptions 
 from google.api_core import exceptions as google_exceptions
-# Cryptography
 from cryptography.hazmat.primitives import serialization as crypto_serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend as crypto_default_backend
-
-# --- LLM Import ---
 import openai
 try:
     from github import Github, GithubException, UnknownObjectException
@@ -52,16 +42,11 @@ try:
     from nacl.encoding import Base64Encoder
 except ImportError:
     nacl = None
-
-# --- Logging Setup ---
-# Configure logging BEFORE defining the Automator class if it uses the logger
+    
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s')
-# Use specific loggers if desired
-logger = logging.getLogger('ai-devops-api.logic') # Logger for the core logic
-api_logger = logging.getLogger('ai-devops-api.service') # Logger for the API service layer
+logger = logging.getLogger('ai-devops-api.logic')  
+api_logger = logging.getLogger('ai-devops-api.service')  
 
-# --- Helper Functions (Keep generate_ssh_key_pair, remove_readonly) ---
-# Make sure generate_ssh_key_pair returns the temp_dir
 def generate_ssh_key_pair(key_filename_base="ai-devops-key"):
     """
     Generates or ensures an RSA SSH key pair exists locally.
@@ -76,26 +61,26 @@ def generate_ssh_key_pair(key_filename_base="ai-devops-key"):
 
     logger.info(f"Generating new SSH key pair: {key_filename_base} in {temp_key_dir}")
     try:
-         key = rsa.generate_private_key(
-             backend=crypto_default_backend(), public_exponent=65537, key_size=2048
-         )
-         private_key_pem = key.private_bytes(
-             crypto_serialization.Encoding.PEM, crypto_serialization.PrivateFormat.TraditionalOpenSSL, crypto_serialization.NoEncryption()
-         )
-         public_key = key.public_key()
-         public_key_ssh = public_key.public_bytes(
-             crypto_serialization.Encoding.OpenSSH, crypto_serialization.PublicFormat.OpenSSH
-         )
-         with open(private_key_path, "wb") as f: f.write(private_key_pem)
-         try:
-              # On Linux/macOS, set 600 permissions. Windows doesn't have direct equivalent easily.
-              os.chmod(private_key_path, stat.S_IREAD | stat.S_IWRITE)
-              logger.info(f"Private key saved to: {private_key_path} (Basic permissions set)")
-         except OSError:
-               logger.warning(f"Private key saved to: {private_key_path} (Could not set restrictive permissions)")
-         with open(public_key_path, "wb") as f: f.write(public_key_ssh)
-         logger.info(f"Public key saved to: {public_key_path}")
-         public_key_content = public_key_ssh.decode('utf-8')
+        key = rsa.generate_private_key(
+            backend=crypto_default_backend(), public_exponent=65537, key_size=2048
+        )
+        private_key_pem = key.private_bytes(
+            crypto_serialization.Encoding.PEM, crypto_serialization.PrivateFormat.TraditionalOpenSSL, crypto_serialization.NoEncryption()
+        )
+        public_key = key.public_key()
+        public_key_ssh = public_key.public_bytes(
+            crypto_serialization.Encoding.OpenSSH, crypto_serialization.PublicFormat.OpenSSH
+        )
+        with open(private_key_path, "wb") as f: f.write(private_key_pem)
+        try:
+            # On Linux/macOS, set 600 permissions. Windows doesn't have direct equivalent easily.
+            os.chmod(private_key_path, stat.S_IREAD | stat.S_IWRITE)
+            logger.info(f"Private key saved to: {private_key_path} (Basic permissions set)")
+        except OSError:
+            logger.warning(f"Private key saved to: {private_key_path} (Could not set restrictive permissions)")
+        with open(public_key_path, "wb") as f: f.write(public_key_ssh)
+        logger.info(f"Public key saved to: {public_key_path}")
+        public_key_content = public_key_ssh.decode('utf-8')
     except Exception as e:
         logger.error(f"Failed to generate new key pair: {e}", exc_info=True)
         try: shutil.rmtree(temp_key_dir)
@@ -103,10 +88,10 @@ def generate_ssh_key_pair(key_filename_base="ai-devops-key"):
         return None, None, None, None # Return None for temp_dir too
 
     if not public_key_content:
-         logger.error("Failed to obtain public key content.")
-         try: shutil.rmtree(temp_key_dir)
-         except Exception as cleanup_e: logger.error(f"Error cleaning up key directory {temp_key_dir}: {cleanup_e}")
-         return None, None, None, None # Return None for temp_dir too
+        logger.error("Failed to obtain public key content.")
+        try: shutil.rmtree(temp_key_dir)
+        except Exception as cleanup_e: logger.error(f"Error cleaning up key directory {temp_key_dir}: {cleanup_e}")
+        return None, None, None, None # Return None for temp_dir too
 
     return private_key_path, public_key_content, key_filename_base, temp_key_dir
 
@@ -116,51 +101,17 @@ def remove_readonly(func, path, exc_info):
     if not os.access(path, os.W_OK):
         logger.debug(f"Attempting to change permissions for: {path}")
         try:
-             os.chmod(path, stat.S_IWRITE)
-             func(path) # Retry the function (e.g., os.remove)
-             logger.debug(f"Successfully removed after permission change: {path}")
+            os.chmod(path, stat.S_IWRITE)
+            func(path) # Retry the function (e.g., os.remove)
+            logger.debug(f"Successfully removed after permission change: {path}")
         except Exception as e:
-             logger.error(f"Failed to remove {path} even after permission change: {e}")
-             exc_type, exc_value, tb = exc_info
-             # Avoid raising inside the error handler if possible, log instead
-             # raise exc_type(exc_value).with_traceback(tb)
-    else:
-         exc_type, exc_value, tb = exc_info
-         logger.error(f"Cleanup error on {path} not related to read-only permissions: {exc_value}")
-         # Avoid raising inside the error handler if possible, log instead
-         # raise exc_type(exc_value).with_traceback(tb)
-
-# --- AIDevOpsAutomator Class (Core Logic) ---
-# Keep the class definition exactly as provided in the previous prompt,
-# ensuring generate_ssh_key_pair is called correctly within its methods
-# (e.g., in _create_aws_ec2_instance, _create_azure_vm, _create_gcp_vm)
-# to capture the temp_key_dir in self.ssh_key_paths.
-# Example change needed inside _create_aws_ec2_instance:
-#   ...
-#   try:
-#        # MODIFIED CALL to capture temp_dir
-#        private_key_path, public_key_material, _, temp_key_dir = generate_ssh_key_pair(key_name_base)
-#        if not private_key_path: return False
-#        # Store ALL relevant paths/info including temp_dir
-#        self.ssh_key_paths = {
-#            'private': private_key_path,
-#            'public': os.path.join(temp_key_dir, f"{key_filename_base}.pub"), # Construct public path correctly
-#            'key_name': None, # Will be set later
-#            'temp_dir': temp_key_dir # Store temp dir for cleanup
-#        }
-#        # ... rest of the key pair logic ...
-#        # Ensure 'key_name' gets populated: self.ssh_key_paths['key_name'] = key_pair_name_aws
-#        # ... rest of the method ...
-#        self.created_resource_details['ssh_key_private_path'] = self.ssh_key_paths.get('private')
-#        return True
-#   ...
-# Make similar changes in _create_azure_vm and _create_gcp_vm
-
+                logger.error(f"Failed to remove {path} even after permission change: {e}")
+                exc_type, exc_value, tb = exc_info
+        else:
+            exc_type, exc_value, tb = exc_info
+            logger.error(f"Cleanup error on {path} not related to read-only permissions: {exc_value}")
+            
 class AIDevOpsAutomator:
-    # --- PASTE THE ENTIRE AIDevOpsAutomator CLASS CODE HERE ---
-    # --- From the previous prompt (the one modified for API context) ---
-    # --- Make sure the generate_ssh_key_pair calls are updated as noted above ---
-    # Keep __init__ mostly the same, but remove CLI-specific args parsing if any
     def __init__(self):
         self.repo_url = None
         self.git_token = None # Store token temporarily if needed
@@ -179,7 +130,7 @@ class AIDevOpsAutomator:
         self.repo_object = None
         self.ssh_key_secret_set = False
         self.commit_pushed = False # Track commit status
-
+        
         # Initialize OpenAI Client (Consider making API key injectable)
         try:
             api_key = os.environ.get("OPENAI_API_KEY")
@@ -188,21 +139,20 @@ class AIDevOpsAutomator:
             else:
                 # Ensure openai library was imported successfully before using it
                 if 'openai' in globals() and openai is not None:
-                     self.openai_client = openai.OpenAI(api_key=api_key)
-                     logger.info("OpenAI client initialized.")
+                    self.openai_client = openai.OpenAI(api_key=api_key)
+                    logger.info("OpenAI client initialized.")
                 else:
-                     logger.error("OpenAI library import failed earlier or library not found. Cannot initialize client.")
-                     self.openai_client = None
+                    logger.error("OpenAI library import failed earlier or library not found. Cannot initialize client.")
+                    self.openai_client = None
 
         except ImportError:
-             logger.warning("OpenAI library not found (`pip install openai`). LLM features disabled.")
-             self.openai_client = None
+            logger.warning("OpenAI library not found (`pip install openai`). LLM features disabled.")
+            self.openai_client = None
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI client: {e}")
             self.openai_client = None
 
-    # --- Methods adapted for API context ---
-
+        
     # Step 1: Set Git Info (replaces collect_git_credentials)
     def set_git_info(self, repo_url: str, git_token: Optional[str] = None) -> bool:
         logger.info(f"Setting Git info: URL={repo_url}, Token Provided: {'Yes' if git_token else 'No'}")
@@ -213,7 +163,7 @@ class AIDevOpsAutomator:
         if not self.repo_url:
             logger.error("Repository URL cannot be empty")
             return False
-
+        
         # Simplified GitHub check for API usage possibility
         if self.repo_url.startswith("https://github.com/"):
             self.is_github_repo = True
@@ -239,10 +189,10 @@ class AIDevOpsAutomator:
                     logger.warning("Falling back to clone-based operations due to GitHub auth failure.")
                     # Don't return False here, allow fallback to clone
                 except ImportError as e:
-                     logger.error(f"{e}")
-                     self.github_client = None
-                     self.is_github_repo = False
-                     logger.warning("Falling back to clone-based operations.")
+                    logger.error(f"{e}")
+                    self.github_client = None
+                    self.is_github_repo = False
+                    logger.warning("Falling back to clone-based operations.")
                 except Exception as e:
                     logger.error(f"Unexpected error initializing GitHub client: {e}", exc_info=True)
                     self.github_client = None
@@ -255,7 +205,7 @@ class AIDevOpsAutomator:
             # No need to prompt for token here, rely on provided `git_token` if needed for clone
 
         return True
-
+    
     def _get_github_repo_object(self) -> bool:
         """Gets the PyGithub Repository object. Should only be called if is_github_repo and github_client are valid."""
         if not self.is_github_repo or not self.github_client:
@@ -268,9 +218,9 @@ class AIDevOpsAutomator:
         # Extract repo name (safer parsing)
         repo_full_name = None
         if self.repo_url.startswith("https://github.com/"):
-             parts = self.repo_url.split('/')
-             if len(parts) >= 5:
-                  repo_full_name = f"{parts[3]}/{parts[4].replace('.git','')}"
+            parts = self.repo_url.split('/')
+            if len(parts) >= 5:
+                repo_full_name = f"{parts[3]}/{parts[4].replace('.git','')}"
 
         if not repo_full_name:
             logger.error(f"Could not extract valid GitHub repository name from URL: {self.repo_url}")
@@ -292,8 +242,7 @@ class AIDevOpsAutomator:
             logger.error(f"Unexpected error getting GitHub repo object: {e}", exc_info=True)
             self.repo_object = None
             return False
-
-
+        
     def access_repository_and_detect_stack(self) -> bool:
         """
         Accesses repository files (via API for GitHub, clone otherwise)
@@ -302,22 +251,22 @@ class AIDevOpsAutomator:
         if self.is_github_repo and self.github_client: # Ensure client is valid too
             # Make sure repo object is available
             if not self.repo_object and not self._get_github_repo_object():
-                 logger.warning("Could not get GitHub repo object. Falling back to clone method.")
-                 self.is_github_repo = False # Force clone if API object fails
-                 return self._access_repository_via_clone()
+                logger.warning("Could not get GitHub repo object. Falling back to clone method.")
+                self.is_github_repo = False # Force clone if API object fails
+                return self._access_repository_via_clone()
             # Proceed with API detection if repo object is valid
             if self.repo_object:
-                 return self._detect_stack_via_api()
+                return self._detect_stack_via_api()
             else: # Should not happen if _get_github_repo_object worked, but safety check
-                 logger.warning("GitHub repo object unexpectedly missing after check. Falling back to clone method.")
-                 self.is_github_repo = False
-                 return self._access_repository_via_clone()
+                logger.warning("GitHub repo object unexpectedly missing after check. Falling back to clone method.")
+                self.is_github_repo = False
+                return self._access_repository_via_clone()
 
         else:
             # Use the original clone-based method
             logger.info("Using local clone method for stack detection.")
             return self._access_repository_via_clone()
-
+        
     def _detect_stack_via_api(self) -> bool:
         """Detects stack by listing root files using GitHub API."""
         logger.info("Detecting technology stack via GitHub API...")
@@ -345,7 +294,7 @@ class AIDevOpsAutomator:
             logger.error(f"Error detecting stack via API: {e}", exc_info=True)
             self.detected_stack = 'unknown' # Set to unknown on error
             return False
-
+        
     def _access_repository_via_clone(self) -> bool:
         logger.info(f"Accessing repository via local clone: {self.repo_url}")
         # Clean up previous clone path if exists
@@ -405,7 +354,7 @@ class AIDevOpsAutomator:
             logger.error(f"Unexpected error accessing repository via clone: {e}", exc_info=True)
             # Cleanup happens in the calling function (execute_workflow) or via explicit cleanup call
             return False
-
+        
     def _detect_stack_from_local_dir(self) -> bool:
         """Detects stack based on files in self.repo_path."""
         logger.info("Detecting technology stack from local directory...")
@@ -424,7 +373,7 @@ class AIDevOpsAutomator:
             logger.error(f"Error detecting technology stack locally: {e}", exc_info=True)
             self.detected_stack = 'unknown'
             return False
-
+        
     def _determine_stack_from_files(self, files: List[str]) -> str:
         """Helper function to determine stack from a list of filenames."""
         stack = 'unknown' # Default to unknown
@@ -447,10 +396,8 @@ class AIDevOpsAutomator:
             logger.info(f"Detected stack '{stack}' along with a Dockerfile. Keeping primary stack '{stack}'.")
 
         return stack
-
+    
     # Step 3: Set Cloud Info
-    # Inside the AIDevOpsAutomator class in main.py
-
     def set_cloud_info(self, provider: str, credentials: dict) -> bool:
         # Log received data right at the start of the method
         logger.info(f"Automator.set_cloud_info received: provider='{provider}', credentials={credentials}") # Log raw credentials received
@@ -475,8 +422,6 @@ class AIDevOpsAutomator:
         for k, v in credentials.items():
             self.cloud_credentials[k] = v
         logger.debug(f"Internal self.cloud_credentials stored: {self.cloud_credentials}") # Log the stored dict
-
-        # ===> Detailed Validation Checks <===
         # Check required fields based on provider and the 'type' within credentials
         cred_type = self.cloud_credentials.get('type')
         if not cred_type:
@@ -485,7 +430,6 @@ class AIDevOpsAutomator:
 
         if provider == 'aws':
             if cred_type == 'keys':
-                # ===> CORRECTED KEYS HERE <===
                 # Check for the keys actually used by _get_aws_session
                 access_key_id_exists = self.cloud_credentials.get('access_key_id')
                 secret_access_key_exists = self.cloud_credentials.get('secret_access_key')
@@ -507,11 +451,7 @@ class AIDevOpsAutomator:
                 if base_type == 'keys' and (not self.cloud_credentials.get('base_access_key') or not self.cloud_credentials.get('base_secret_key')):
                     logger.error("Validation Failed: AWS AssumeRole (Base Keys) selected, but 'base_access_key' or 'base_secret_key' missing/null.")
                     return False
-                # Add check for base_profile if base_type is profile? (Optional but good)
-                # if base_type == 'profile' and not self.cloud_credentials.get('base_profile'):
-                #      logger.warning("AWS AssumeRole (Base Profile) selected, but 'base_profile' name is missing (will use default).")
-
-
+                 
         elif provider == 'azure':
             # Subscription ID is always required for Azure in this implementation
             if not self.cloud_credentials.get('subscription_id'):
@@ -538,10 +478,8 @@ class AIDevOpsAutomator:
         self.cloud_provider = provider # Set the provider attribute on the instance
         logger.info(f"Cloud provider '{provider}' set on automator instance. Credentials structure validated.")
 
-        # logger.info(f"Cloud provider '{provider}' credentials validated successfully.")
         return True # Returns True only if all checks pass
 
-    # --- Cloud Client/Session Helpers (Keep as is) ---
     def _get_aws_session(self) -> Optional[boto3.Session]:
         """Initializes and returns a boto3 Session based on stored credentials."""
         creds = self.cloud_credentials
@@ -552,15 +490,15 @@ class AIDevOpsAutomator:
             try: region = boto3.Session().region_name # Try default session region
             except Exception: pass
         if not region and creds.get('type') == 'profile':
-             try:
-                 profile = creds.get('profile', 'default') # Use 'default' if profile name missing
-                 region = boto3.Session(profile_name=profile).region_name
-             except Exception: pass # Ignore errors getting region from profile
+            try:
+                profile = creds.get('profile', 'default') # Use 'default' if profile name missing
+                region = boto3.Session(profile_name=profile).region_name
+            except Exception: pass # Ignore errors getting region from profile
         if region:
-             session_params['region_name'] = region
+            session_params['region_name'] = region
         else:
-             session_params['region_name'] = 'us-east-1'; # Last resort fallback
-             logger.warning(f"Could not determine AWS region. Defaulting to {session_params['region_name']}.")
+            session_params['region_name'] = 'us-east-1'; # Last resort fallback
+            logger.warning(f"Could not determine AWS region. Defaulting to {session_params['region_name']}.")
 
         # Update stored creds with the region actually being used
         self.cloud_credentials['region'] = session_params['region_name']
@@ -587,49 +525,49 @@ class AIDevOpsAutomator:
                 boto3.Session(**session_params).client('sts').get_caller_identity()
                 return boto3.Session(**session_params)
             elif cred_type == 'assume_role':
-                 logger.info(f"Attempting to assume role: {creds.get('role_arn')}")
-                 # Base session parameters depend on base_type
-                 base_session_params = {'region_name': session_params['region_name']}
-                 base_type = creds.get('base_type')
-                 base_session = None
-                 if base_type == 'profile':
-                      base_profile = creds.get('base_profile', 'default')
-                      base_session_params['profile_name'] = base_profile
-                      logger.info(f"Using base profile '{base_profile}' for AssumeRole.")
-                      base_session = boto3.Session(**base_session_params)
-                 elif base_type == 'keys':
-                      if not creds.get('base_access_key') or not creds.get('base_secret_key'):
-                           logger.error("Base AWS Keys missing for AssumeRole.")
-                           return None
-                      base_session_params['aws_access_key_id'] = creds.get('base_access_key')
-                      base_session_params['aws_secret_access_key'] = creds.get('base_secret_key')
-                      logger.info("Using base keys for AssumeRole.")
-                      base_session = boto3.Session(**base_session_params)
-                 else:
-                     logger.error(f"Invalid base credential type '{base_type}' for assume role."); return None
+                logger.info(f"Attempting to assume role: {creds.get('role_arn')}")
+                # Base session parameters depend on base_type
+                base_session_params = {'region_name': session_params['region_name']}
+                base_type = creds.get('base_type')
+                base_session = None
+                if base_type == 'profile':
+                    base_profile = creds.get('base_profile', 'default')
+                    base_session_params['profile_name'] = base_profile
+                    logger.info(f"Using base profile '{base_profile}' for AssumeRole.")
+                    base_session = boto3.Session(**base_session_params)
+                elif base_type == 'keys':
+                    if not creds.get('base_access_key') or not creds.get('base_secret_key'):
+                        logger.error("Base AWS Keys missing for AssumeRole.")
+                        return None
+                    base_session_params['aws_access_key_id'] = creds.get('base_access_key')
+                    base_session_params['aws_secret_access_key'] = creds.get('base_secret_key')
+                    logger.info("Using base keys for AssumeRole.")
+                    base_session = boto3.Session(**base_session_params)
+                else:
+                    logger.error(f"Invalid base credential type '{base_type}' for assume role."); return None
 
-                 # Test base credentials before assuming role
-                 base_session.client('sts').get_caller_identity()
+                # Test base credentials before assuming role
+                base_session.client('sts').get_caller_identity()
 
-                 sts_client = base_session.client('sts')
-                 role_arn = creds.get('role_arn')
-                 session_name = creds.get('session_name', 'ai-devops-api-session') # Default session name
-                 if not role_arn:
-                      logger.error("Role ARN is missing for AssumeRole.")
-                      return None
+                sts_client = base_session.client('sts')
+                role_arn = creds.get('role_arn')
+                session_name = creds.get('session_name', 'ai-devops-api-session') # Default session name
+                if not role_arn:
+                    logger.error("Role ARN is missing for AssumeRole.")
+                    return None
 
-                 assumed_role_object = sts_client.assume_role(
+                assumed_role_object = sts_client.assume_role(
                       RoleArn=role_arn, RoleSessionName=session_name
-                 )
-                 assumed_creds = assumed_role_object['Credentials']
-                 logger.info(f"Successfully assumed role {role_arn}")
+            )
+                assumed_creds = assumed_role_object['Credentials']
+                logger.info(f"Successfully assumed role {role_arn}")
                  # Return session using assumed credentials
-                 return boto3.Session(
-                      aws_access_key_id=assumed_creds['AccessKeyId'],
-                      aws_secret_access_key=assumed_creds['SecretAccessKey'],
-                      aws_session_token=assumed_creds['SessionToken'],
-                      region_name=session_params['region_name']
-                 )
+                return boto3.Session(
+                    aws_access_key_id=assumed_creds['AccessKeyId'],
+                    aws_secret_access_key=assumed_creds['SecretAccessKey'],
+                    aws_session_token=assumed_creds['SessionToken'],
+                    region_name=session_params['region_name']
+                )
             else:
                 logger.error(f"Unsupported AWS credential type: {cred_type}"); return None
         except (ClientError, NoCredentialsError) as e:
@@ -642,8 +580,7 @@ class AIDevOpsAutomator:
             return None
         except Exception as e:
             logger.error(f"Failed to create AWS session: {e}", exc_info=True); return None
-
-
+            
     def _get_azure_credential(self) -> Optional[Any]: # Return type can vary (TokenCredential subclasses)
          """Gets the appropriate Azure credential object."""
          creds = self.cloud_credentials
@@ -682,120 +619,110 @@ class AIDevOpsAutomator:
                    if msi_client_id:
                         logger.info(f"Using User-Assigned Managed Identity (ClientID: {msi_client_id}).")
                         try:
-                             credential = azure.identity.ManagedIdentityCredential(client_id=msi_client_id)
-                             credential.get_token("https://management.azure.com/.default") # Test
-                             logger.info("User-Assigned Managed Identity credential obtained.")
+                            credential = azure.identity.ManagedIdentityCredential(client_id=msi_client_id)
+                            credential.get_token("https://management.azure.com/.default") # Test
+                            logger.info("User-Assigned Managed Identity credential obtained.")
                         except Exception as msi_err:
-                             logger.error(f"Failed to get token using User-Assigned MSI (ClientID: {msi_client_id}): {msi_err}.")
-                             return None
+                            logger.error(f"Failed to get token using User-Assigned MSI (ClientID: {msi_client_id}): {msi_err}.")
+                            return None
                    else:
                         logger.info("Using System-Assigned Managed Identity.")
                         try:
-                             credential = azure.identity.ManagedIdentityCredential()
-                             credential.get_token("https://management.azure.com/.default") # Test
-                             logger.info("System-Assigned Managed Identity credential obtained.")
+                            credential = azure.identity.ManagedIdentityCredential()
+                            credential.get_token("https://management.azure.com/.default") # Test
+                            logger.info("System-Assigned Managed Identity credential obtained.")
                         except Exception as msi_err:
-                             logger.error(f"Failed to get token using System-Assigned MSI: {msi_err}. Is MSI enabled for the environment?")
-                             return None
+                            logger.error(f"Failed to get token using System-Assigned MSI: {msi_err}. Is MSI enabled for the environment?")
+                            return None
               else:
-                   logger.error(f"Unsupported Azure credential type: {cred_type}"); return None
+                   logger.error(f"Unsupported Azure credential type: {cred_type}")
+                   return None
 
               return credential # Return the obtained credential object
 
          except ImportError: logger.error("Azure identity library not found (`pip install azure-identity`)."); return None
          except azure.identity.CredentialUnavailableError as e:
-              logger.error(f"Azure Credential Unavailable: {e}. Check environment or configuration for {cred_type}.")
-              return None
+            logger.error(f"Azure Credential Unavailable: {e}. Check environment or configuration for {cred_type}.")
+            return None
          except Exception as e: # Catch other potential errors during credential creation/testing
-             logger.error(f"Failed to create or test Azure credential object: {e}", exc_info=True); return None
+            logger.error(f"Failed to create or test Azure credential object: {e}", exc_info=True)
+            return None
 
-
-    def _get_gcp_credential(self) -> Optional[Tuple[Any, str]]: # Return type is tuple(Credentials, project_id)
-         """Gets GCP credentials object and project ID."""
-         creds = self.cloud_credentials
-         project_id = creds.get('project_id')
-         if not project_id:
-             logger.error("GCP Project ID is missing in credentials."); return None, None
-
-         try:
-              cred_type = creds.get('type')
-              credentials = None
-              if cred_type == 'application_default':
-                   logger.info(f"Using GCP Application Default Credentials for project {project_id}.")
-                   try:
-                        # Use google.auth here
-                        credentials, discovered_project_id = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-                        if not credentials:
-                             raise google.auth.exceptions.DefaultCredentialsError("ADC credentials not found.")
-                        # ADC might discover a different project, warn if mismatch
-                        if discovered_project_id and discovered_project_id != project_id:
-                           logger.warning(f"ADC discovered project '{discovered_project_id}', but using configured project '{project_id}'.")
-                        # Explicitly associate project_id for quota and client libraries if needed
-                        scoped_credentials = credentials.with_quota_project(project_id)
-                        logger.info("GCP Application Default Credentials obtained.")
-                        return scoped_credentials, project_id
-                   except google.auth.exceptions.DefaultCredentialsError as e:
-                        logger.error(f"GCP Application Default Credentials Error: {e}. Ensure ADC is configured (e.g., `gcloud auth application-default login`).")
-                        return None, None
-              elif cred_type == 'service_account':
-                   key_file_path = creds.get('key_file')
-                   if not key_file_path:
-                        logger.error("Service Account type selected, but 'key_file' path is missing.")
-                        return None, None
-                   logger.info(f"Using GCP Service Account key file: {key_file_path} for project {project_id}.")
-                   if not os.path.exists(key_file_path):
-                        logger.error(f"GCP Service Account key file not found at path: {key_file_path}")
-                        return None, None
-                   try:
-                        credentials = service_account.Credentials.from_service_account_file(
-                             key_file_path, scopes=["https://www.googleapis.com/auth/cloud-platform"]
-                         )
-                        scoped_credentials = credentials.with_quota_project(project_id)
-                        logger.info("GCP Service Account credentials loaded successfully.")
-                        return scoped_credentials, project_id
-                   except Exception as e:
-                        logger.error(f"Failed to load GCP Service Account key file '{key_file_path}': {e}")
-                        return None, None
-              else:
-                   logger.error(f"Unsupported GCP credential type: {cred_type}"); return None, None
-         # Catch specific auth exceptions
-         except (google.auth.exceptions.RefreshError, FileNotFoundError) as e:
-              logger.error(f"GCP credential error: {e}"); return None, None
-         except Exception as e: # Catch other potential errors
-             logger.error(f"Failed to get GCP credentials: {e}", exc_info=True); return None, None
-
-
+    def _get_gcp_credential(self) -> Optional[Tuple[Any, str]]:
+        """Gets GCP credentials object and project ID."""
+        creds = self.cloud_credentials
+        project_id = creds.get('projrct_id')
+        if not project_id:
+            logger.error("GCP Project ID is missing for credential creation.")
+            return None
+        
+        try:
+            cred_type = creds.get('type')
+            credentials = None
+            if cred_type == 'application_default':
+                logger.info(f"Using GCP Application Default Credentials (ADC) for project {project_id}.")
+                try:
+                    credentials, discovered_project_id = google.auth.default(scope=["https://www.googleapis.com/auth/cloud-platform"])
+                    if not credentials:
+                        raise google.auth.exceptions.DefaultCredentialsError("ADC credentials not found.")
+                    if discovered_project_id and discovered_project_id != project_id:
+                        logger.warning(f"Discovered project ID '{discovered_project_id}' does not match expected '{project_id}'.")  
+                    scoped_credentials = credentials.with_quota_project(project_id)
+                    logger.info("GCP Project default credentials obtained")
+                    return scoped_credentials, project_id
+                except google.auth.exceptions.DefaultCredentialsError as e:
+                    logger.error(f"GCP Application Default Credentials error: {e}")
+                    return None, None
+                
+            elif cred_type == 'service_account':
+                key_file_path = creds.get("key_file")
+                if not key_file_path:
+                    logger.error("Service Account type selected not 'key_file' path is missing.")
+                    return None, None
+                logger.info(f"Using GCP Service Account Key file: {key_file_path} for project {project_id}.")
+                if not os.path.exists(key_file_path):
+                    logger.error(f"GCP Service Account Key file not found at {key_file_path}.")
+                    return None, None
+                try:
+                    credentials = service_account.Credentials.from_service_account_file(
+                        key_file_path, scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                    )
+                    scoped_credentials = credentials.with_quota_project(project_id)
+                    logger.info("GCP Service Account credentials obtained")
+                    return scoped_credentials, project_id
+                except Exception as e:
+                    logger.error(f"Failed to create GCP Service Account credentials: {e}")
+                    return None, None
+            else:
+                logger.error(f"Unsupported GCP credential type: {cred_type}"); return None, None
+        except(google.auth.exceptions.RefreshError, FileNotFoundError) as e:
+            logger.error(f"GCP credential error: {e}")
+            return None, None
+        except Exception as e:
+            logger.error(f"Failed to grt gcp credentials: {e}", exc_info=True)
+            return None, None
+        
     # Step 4: Set Resource Configuration
     def set_resource_config(self, config: dict) -> bool:
         """ Sets the desired resource configuration directly. """
         logger.info(f"Setting resource configuration...")
-        # Log the raw config received for debugging
         logger.debug(f"Received resource config: {config}")
-
-        # ===> THIS VALIDATION IS FAILING <===
         res_type = config.get('type')
-        create_new = config.get('create_new') # Explicitly check boolean
-        if not res_type or create_new is None: # Check if None explicitly
-            # This log message matches what you see
+        create_new = config.get('create_new') 
+        if not res_type or create_new is None: 
             logger.error("Resource configuration must include 'type' (string) and 'create_new' (boolean).")
             return False
-             
-        # --- Provider-Specific Required Fields ---
-        # Update internal config ONLY with keys relevant to the provider/type
-        # Also update top-level keys like region/location/project if provided in config
-
+        
         if self.cloud_provider == 'aws':
-            # Region is essential, get it from config or existing creds
             region = config.get('region', self.cloud_credentials.get('region'))
             if not region:
-                # Try to get from session if possible (but session might not exist yet)
                 session = self._get_aws_session()
                 region = session.region_name if session else None
             if not region:
                 logger.error("AWS region could not be determined. Please provide it in resource config or credentials.")
                 return False
             self.resource_configuration['region'] = region
-            # Add specific AWS resource fields
+            
             if res_type == 'ec2':
                 self.resource_configuration['instance_name'] = config.get('instance_name', f'ai-devops-instance-{uuid.uuid4().hex[:6]}')
                 if create_new:
@@ -805,85 +732,78 @@ class AIDevOpsAutomator:
             elif res_type == 'lambda':
                 self.resource_configuration['function_name'] = config.get('function_name', f'ai-devops-function-{uuid.uuid4().hex[:6]}')
                 if create_new:
-                     self.resource_configuration['memory'] = config.get('memory', 128)
-            # Add other AWS types
-
+                    self.resource_configuration['memory'] = config.get('memory', 128)
+        
         elif self.cloud_provider == 'azure':
              # Location and Resource Group are essential
-             location = config.get('location', self.cloud_credentials.get('location')) # Allow location in creds too
-             rg = config.get('resource_group')
-             if not location or not rg:
-                  logger.error("Azure 'location' and 'resource_group' must be provided in resource config.")
-                  return False
-             self.resource_configuration['location'] = location
-             self.resource_configuration['resource_group'] = rg
+            location = config.get('location', self.cloud_credentials.get('location')) 
+            rg = config.get('resource_group')
+            if not location or not rg:
+                logger.error("Azure 'location' and 'resource_group' must be provided in resource config.")
+                return False
+            self.resource_configuration['location'] = location
+            self.resource_configuration['resource_group'] = rg
              # Add specific Azure resource fields
-             if res_type == 'vm':
-                  self.resource_configuration['vm_name'] = config.get('vm_name', f'aidevops-vm-{uuid.uuid4().hex[:6]}')
-                  if create_new:
-                       self.resource_configuration['vm_size'] = config.get('vm_size', 'Standard_B1s')
-                       self.resource_configuration['admin_username'] = config.get('admin_username', 'azureuser')
-             elif res_type == 'app_service':
-                  self.resource_configuration['app_name'] = config.get('app_name', f'aidevops-app-{uuid.uuid4().hex[:6]}')
-                  # Add plan name etc. if creating new
-             # Add other Azure types
-
+            if res_type == 'vm':
+                self.resource_configuration['vm_name'] = config.get('vm_name', f'aidevops-vm-{uuid.uuid4().hex[:6]}')
+                if create_new:
+                    self.resource_configuration['vm_size'] = config.get('vm_size', 'Standard_B1s')
+                    self.resource_configuration['admin_username'] = config.get('admin_username', 'azureuser')
+            elif res_type == 'app_service':
+                self.resource_configuration['app_name'] = config.get('app_name', f'aidevops-app-{uuid.uuid4().hex[:6]}')
+                
         elif self.cloud_provider == 'gcp':
              # Project ID is essential (should be in creds)
-             project_id = config.get('project_id', self.cloud_credentials.get('project_id'))
-             if not project_id:
-                  logger.error("GCP 'project_id' could not be determined.")
-                  return False
-             self.resource_configuration['project_id'] = project_id
-             # Zone or Region often needed
-             zone = config.get('zone')
-             region = config.get('region')
-             if not zone and res_type == 'vm': # Zone needed for VM
-                  logger.error("GCP 'zone' must be provided for VM resource config.")
-                  return False
-             if not region and res_type == 'cloud_run': # Region needed for Cloud Run
-                  logger.error("GCP 'region' must be provided for Cloud Run resource config.")
-                  return False
-             if zone: self.resource_configuration['zone'] = zone
-             if region: self.resource_configuration['region'] = region
+            project_id = config.get('project_id', self.cloud_credentials.get('project_id'))
+            if not project_id:
+                logger.error("GCP 'project_id' could not be determined.")
+                return False
+            self.resource_configuration['project_id'] = project_id
+            # Zone or Region often needed
+            zone = config.get('zone')
+            region = config.get('region')
+            if not zone and res_type == 'vm': # Zone needed for VM
+                logger.error("GCP 'zone' must be provided for VM resource config.")
+                return False
+            if not region and res_type == 'cloud_run': # Region needed for Cloud Run
+                logger.error("GCP 'region' must be provided for Cloud Run resource config.")
+                return False
+            if zone: self.resource_configuration['zone'] = zone
+            if region: self.resource_configuration['region'] = region
 
-             # Add specific GCP resource fields
-             if res_type == 'vm':
-                  self.resource_configuration['instance_name'] = config.get('instance_name', f'ai-devops-instance-{uuid.uuid4().hex[:6]}')
-                  if create_new:
-                       self.resource_configuration['machine_type'] = config.get('machine_type', 'e2-micro')
-             elif res_type == 'cloud_run':
-                  self.resource_configuration['service_name'] = config.get('service_name', f'ai-devops-service-{uuid.uuid4().hex[:6]}')
-             # Add other GCP types
-
+            # Add specific GCP resource fields
+            if res_type == 'vm':
+                self.resource_configuration['instance_name'] = config.get('instance_name', f'ai-devops-instance-{uuid.uuid4().hex[:6]}')
+                if create_new:
+                    self.resource_configuration['machine_type'] = config.get('machine_type', 'e2-micro')
+            elif res_type == 'cloud_run':
+                self.resource_configuration['service_name'] = config.get('service_name', f'ai-devops-service-{uuid.uuid4().hex[:6]}')
+    
         # Handle details for existing resources
         if not create_new:
             if config.get('selected_details'):
                 self.selected_resource_details = config['selected_details']
                 logger.info(f"Using provided details for existing resource: {self.selected_resource_details.get('name', 'N/A')}")
             else:
-                 # Try to synthesize basic info from config if details missing
-                 res_type_display = f"{self.cloud_provider.upper()} {res_type.upper()} (Existing)"
-                 # Map common config keys to a 'name' attribute
-                 name_key = {
-                     'ec2': 'instance_name', 'vm': 'vm_name', 'ecs': 'cluster_name',
-                     'lambda': 'function_name', 'app_service': 'app_name', 'cloud_run': 'service_name'
-                 }.get(res_type, 'name') # Default key is 'name' if not found
-                 res_name = self.resource_configuration.get(name_key, 'Name Not Provided in Config')
-                 self.selected_resource_details = {'type': res_type_display, 'name': res_name}
-                 logger.warning(f"Using existing resource '{res_name}', but full 'selected_details' not provided. Instructions might be limited.")
+                # Try to synthesize basic info from config if details missing
+                res_type_display = f"{self.cloud_provider.upper()} {res_type.upper()} (Existing)"
+                # Map common config keys to a 'name' attribute
+                name_key = {
+                    'ec2': 'instance_name', 'vm': 'vm_name', 'ecs': 'cluster_name',
+                    'lambda': 'function_name', 'app_service': 'app_name', 'cloud_run': 'service_name'
+                }.get(res_type, 'name') # Default key is 'name' if not found
+                res_name = self.resource_configuration.get(name_key, 'Name Not Provided in Config')
+                self.selected_resource_details = {'type': res_type_display, 'name': res_name}
+                logger.warning(f"Using existing resource '{res_name}', but full 'selected_details' not provided. Instructions might be limited.")
             # Clear generated key paths if using existing VM-like resource, as script didn't create its key
             if res_type in ['ec2', 'vm']:
-                 self.ssh_key_paths = {}
-                 logger.info("Cleared generated SSH key paths as an existing VM-like resource was selected.")
+                self.ssh_key_paths = {}
+                logger.info("Cleared generated SSH key paths as an existing VM-like resource was selected.")
 
         logger.info("Resource configuration set successfully.")
         logger.debug(f"Final resource configuration state: {self.resource_configuration}")
         return True
-
-
-    # --- Resource Creation Methods (Keep as internal helpers) ---
-    # Make sure they use self.resource_configuration and handle SSH key generation correctly
+    
     def _create_aws_ec2_instance(self, ec2_client) -> bool:
         logger.info("Executing creation of NEW AWS EC2 instance...")
         instance_type = self.resource_configuration.get('instance_type', 't2.micro')
@@ -895,222 +815,206 @@ class AIDevOpsAutomator:
         region = self.resource_configuration.get('region')
         if not region: logger.error("AWS Region missing in configuration."); return False
 
-        key_temp_dir = None # Initialize key temp dir tracker
-
+        key_temp_dir = None
+        
         try:
-             # --- SSH Key Generation/Import ---
-             # MODIFIED CALL to capture temp_dir
-             private_key_path, public_key_material, _, temp_key_dir = generate_ssh_key_pair(key_name_base)
-             if not private_key_path or not public_key_material or not temp_key_dir:
-                  logger.error("Failed to generate SSH key pair.")
-                  return False
-             # Store ALL relevant paths/info including temp_dir
-             self.ssh_key_paths = {
-                 'private': private_key_path,
-                 'public': os.path.join(temp_key_dir, f"{key_filename_base}.pub"), # Construct public path correctly
-                 'key_name': None, # Will be set later by AWS import/check
-                 'temp_dir': temp_key_dir # Store temp dir for cleanup
-             }
-             logger.debug(f"SSH key paths stored: {self.ssh_key_paths}")
-
-             key_pair_name_aws = None
-             try:
-                  # Check if key pair with this name already exists in AWS EC2
-                  ec2_client.describe_key_pairs(KeyNames=[key_name_base])
-                  key_pair_name_aws = key_name_base
-                  logger.info(f"Using existing AWS key pair found with name: {key_name_base}")
-                  # NOTE: We generated a local key but found an existing one in AWS.
-                  # The instance will be launched with the *existing* AWS key.
-                  # The generated local key's temp dir WILL still be cleaned up.
-                  # Instructions should mention the user needs the key named 'key_name_base'.
-                  # We overwrite the stored paths to reflect we are using the AWS one now.
-                  self.ssh_key_paths['key_name'] = key_pair_name_aws
-                  self.ssh_key_paths['private'] = f"~/.ssh/{key_pair_name_aws}.pem (Assumed Location - Use Existing Key)" # Indicate existing key needed
-                  self.ssh_key_paths['public'] = "N/A (Managed by AWS)"
-                  # Don't delete the temp_key_dir here, cleanup handles it. User needs the *other* key.
-
-             except ClientError as e:
-                  if e.response['Error']['Code'] == 'InvalidKeyPair.NotFound':
-                       logger.info(f"Importing local public key to AWS EC2 as '{key_name_base}'...")
-                       try:
-                            key_pair = ec2_client.import_key_pair(KeyName=key_name_base, PublicKeyMaterial=public_key_material.encode('utf-8'))
-                            key_pair_name_aws = key_pair['KeyName']
-                            self.ssh_key_paths['key_name'] = key_pair_name_aws # Store the confirmed name
-                            logger.info(f"Successfully imported key pair to AWS: {key_pair_name_aws}")
-                       except ClientError as import_e:
-                            logger.error(f"Failed to import generated key pair to AWS: {import_e}")
-                            # Cleanup generated keys before returning
-                            if temp_key_dir: shutil.rmtree(temp_key_dir, onerror=remove_readonly)
-                            self.ssh_key_paths = {}
+            private_key_path, public_key_material, _, temp_key_dir = generate_ssh_key_pair(key_name_base)
+            if not private_key_path or not public_key_material or not temp_key_dir:
+                logger.error("Failed ot generate SSH key pair.")
+                return False
+            
+            self.ssh_key_paths = {
+                'private': private_key_path,
+                'public': os.path.join(temp_key_dir, f"{key_filename_base}.pub"),
+                'key_name': None,
+                'temp_dir': temp_key_dir
+            }
+            logger.debug(F"SSH key paths stored: {self.ssh_key_paths}")
+            
+            key_pair_name_aws = None
+            try:
+                ec2_client.describe_key_pairs(KeyNames=[key_name_base])
+                key_pair_name_aws = key_name_base
+                logger.info(f"Using existing AWS key pair found with name: {key_name_base}")
+                self.ssh_key_paths['key_name'] = key_pair_name_aws
+                self.ssh_key_paths['private'] = f"~/.ssh/{key_pair_name_aws}.pem (Assumed Location - Use Existing Key)" # Indicate existing key needed
+                self.ssh_key_paths['public'] = "N/A (Managed by AWS)"
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'InvalidKeyPair.NotFound':
+                    logger.info(f"Importing local public key to AWS EC2 as '{key_name_base}'...")
+                    try:
+                        key_pair = ec2_client.import_key_pair(KeyName=key_name_base, PublicKeyMaterial=public_key_material.encode('utf-8'))
+                        key_pair_name_aws = key_pair['KeyName']
+                        self.ssh_key_paths['key_name'] = key_pair_name_aws # Store the confirmed name
+                        logger.info(f"Successfully imported key pair to AWS: {key_pair_name_aws}")
+                    except ClientError as import_e:
+                        logger.error(f"Failed to import generated key pair to AWS: {import_e}")
+                        if temp_key_dir: 
+                            shutil.rmtree(temp_key_dir, onerror=remove_readonly)
+                        self.ssh_key_paths = {}
+                        return False 
+                else:
+                    logger.error(f"Error checking for existing AWS key pair: {e}")
+                    raise
+                
+            if not key_pair_name_aws:
+                logger.error("Failed to obtain an AWS key pair name for launching the instance.")
+                if temp_key_dir and 'key_name' not in self.ssh_key_paths : # Only cleanup if we didn't decide to use an existing AWS key
+                    shutil.rmtree(temp_key_dir, onerror=remove_readonly)
+                    self.ssh_key_paths = {}
+                return False
+            
+            sg_id = None
+            try:
+                # Check if SG already exists
+                response = ec2_client.describe_security_groups(Filters=[{'Name': 'group-name', 'Values': [sg_name]}])
+                if response.get('SecurityGroups'):
+                    sg_id = response['SecurityGroups'][0]['GroupId']
+                    logger.info(f"Using existing Security Group: {sg_name} ({sg_id})")
+                else:
+                    logger.info(f"Creating new Security Group: {sg_name}")
+                    # Find default VPC
+                    vpc_response = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
+                    if not vpc_response or not vpc_response.get('Vpcs'):
+                        # If no default VPC, try to find *any* VPC
+                        vpc_response = ec2_client.describe_vpcs()
+                        if not vpc_response or not vpc_response.get('Vpcs'):
+                            logger.error("No VPCs found in the account/region. Cannot create Security Group.")
                             return False
-                  else:
-                       logger.error(f"Error checking for existing AWS key pair: {e}")
-                       raise # Re-raise unexpected ClientErrors
-
-             if not key_pair_name_aws:
-                 logger.error("Failed to obtain an AWS key pair name for launching the instance.")
-                 # Cleanup generated keys if import failed or wasn't attempted correctly
-                 if temp_key_dir and 'key_name' not in self.ssh_key_paths : # Only cleanup if we didn't decide to use an existing AWS key
-                      shutil.rmtree(temp_key_dir, onerror=remove_readonly)
-                      self.ssh_key_paths = {}
-                 return False
-
-
-             # --- Security Group ---
-             sg_id = None
-             try:
-                 # Check if SG already exists
-                 response = ec2_client.describe_security_groups(Filters=[{'Name': 'group-name', 'Values': [sg_name]}])
-                 if response.get('SecurityGroups'):
-                     sg_id = response['SecurityGroups'][0]['GroupId']
-                     logger.info(f"Using existing Security Group: {sg_name} ({sg_id})")
-                 else:
-                      logger.info(f"Creating new Security Group: {sg_name}")
-                      # Find default VPC
-                      vpc_response = ec2_client.describe_vpcs(Filters=[{'Name': 'isDefault', 'Values': ['true']}])
-                      if not vpc_response or not vpc_response.get('Vpcs'):
-                           # If no default VPC, try to find *any* VPC
-                           vpc_response = ec2_client.describe_vpcs()
-                           if not vpc_response or not vpc_response.get('Vpcs'):
-                                logger.error("No VPCs found in the account/region. Cannot create Security Group.")
-                                return False
-                           vpc_id = vpc_response['Vpcs'][0]['VpcId']
-                           logger.warning(f"No default VPC found. Using first available VPC: {vpc_id}")
-                      else:
-                           vpc_id = vpc_response['Vpcs'][0]['VpcId']
-                           logger.info(f"Using default VPC: {vpc_id}")
-
-                      sg = ec2_client.create_security_group(GroupName=sg_name, Description=f'AI DevOps SG for {instance_name_tag}', VpcId=vpc_id)
-                      sg_id = sg['GroupId']
-                      # Add ingress rules (SSH, HTTP, HTTPS)
-                      ec2_client.authorize_security_group_ingress(GroupId=sg_id, IpPermissions=[
-                            {'IpProtocol': 'tcp', 'FromPort': 22, 'ToPort': 22, 'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow SSH from anywhere'}]},
-                            {'IpProtocol': 'tcp', 'FromPort': 80, 'ToPort': 80, 'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow HTTP from anywhere'}]},
-                            {'IpProtocol': 'tcp', 'FromPort': 443, 'ToPort': 443, 'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow HTTPS from anywhere'}]}
-                      ])
-                      logger.info(f"Created Security Group {sg_id} and allowed SSH/HTTP/HTTPS ingress from 0.0.0.0/0.")
-             except ClientError as e:
-                 logger.error(f"Error describing or creating Security Group '{sg_name}': {e}")
-                 return False # Cannot proceed without SG
-
-             if not sg_id: logger.error("Failed to get Security Group ID."); return False
+                        vpc_id = vpc_response['Vpcs'][0]['VpcId']
+                        logger.warning(f"No default VPC found. Using first available VPC: {vpc_id}")
+                    else:
+                        vpc_id = vpc_response['Vpcs'][0]['VpcId']
+                        logger.info(f"Using default VPC: {vpc_id}")
+                        
+                    sg = ec2_client.create_security_group(GroupName=sg_name, Description=f'AI DevOps SG for {instance_name_tag}', VpcId=vpc_id)
+                    sg_id = sg['GroupId']
+                    # Add ingress rules (SSH, HTTP, HTTPS)
+                    ec2_client.authorize_security_group_ingress(GroupId=sg_id, IpPermissions=[
+                        {'IpProtocol': 'tcp', 'FromPort': 22, 'ToPort': 22, 'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow SSH from anywhere'}]},
+                        {'IpProtocol': 'tcp', 'FromPort': 80, 'ToPort': 80, 'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow HTTP from anywhere'}]},
+                        {'IpProtocol': 'tcp', 'FromPort': 443, 'ToPort': 443, 'IpRanges': [{'CidrIp': '0.0.0.0/0', 'Description': 'Allow HTTPS from anywhere'}]}
+                    ])
+                    logger.info(f"Created Security Group {sg_id} and allowed SSH/HTTP/HTTPS ingress from 0.0.0.0/0.")
+            except ClientError as e:
+                logger.error(f"Error describing or creating Security Group '{sg_name}': {e}")
+                return False
+                
+            if not sg_id: logger.error("Failed to get Security Group ID."); return False
 
              # --- AMI Selection (Ubuntu 22.04 LTS preferred, Amazon Linux 2 fallback) ---
-             ami_id = None
-             default_ssh_user = None
-             try:
-                 logger.info("Finding latest Ubuntu Server 22.04 LTS (Jammy) HVM SSD AMI...")
-                 filters = [
-                     {'Name': 'name', 'Values': ['ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*']},
-                     {'Name': 'architecture', 'Values': ['x86_64']},
-                     {'Name': 'state', 'Values': ['available']},
-                     {'Name': 'virtualization-type', 'Values': ['hvm']}
-                 ]
-                 # Canonical's owner ID for official Ubuntu AMIs
-                 owner_id = '099720109477'
-                 images = ec2_client.describe_images(Owners=[owner_id], Filters=filters)
+            ami_id = None
+            default_ssh_user = None
+            try:
+                logger.info("Finding latest Ubuntu Server 22.04 LTS (Jammy) HVM SSD AMI...")
+                filters = [
+                    {'Name': 'name', 'Values': ['ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*']},
+                    {'Name': 'architecture', 'Values': ['x86_64']},
+                    {'Name': 'state', 'Values': ['available']},
+                    {'Name': 'virtualization-type', 'Values': ['hvm']}
+                ]
+                # Canonical's owner ID for official Ubuntu AMIs
+                owner_id = '099720109477'
+                images = ec2_client.describe_images(Owners=[owner_id], Filters=filters)
 
-                 if images and images.get('Images'):
-                     # Sort by creation date to get the latest one
-                     ami_id = sorted(images['Images'], key=lambda x: x.get('CreationDate', ''), reverse=True)[0]['ImageId']
-                     default_ssh_user = 'ubuntu' # Default user for Ubuntu AMIs
-                     logger.info(f"Using Ubuntu 22.04 LTS AMI: {ami_id}")
-                 else:
-                     logger.warning("Could not find Ubuntu 22.04 LTS AMI. Falling back to Amazon Linux 2 AMI search...")
-                     amzn_filters = [
-                         {'Name': 'name', 'Values': ['amzn2-ami-hvm-*-x86_64-gp2']},
-                         {'Name': 'state', 'Values': ['available']},
-                         {'Name': 'architecture', 'Values': ['x86_64']},
-                         {'Name': 'virtualization-type', 'Values': ['hvm']}
-                     ]
-                     images = ec2_client.describe_images(Owners=['amazon'], Filters=amzn_filters)
-                     if not images or not images.get('Images'):
-                         logger.error("Could not find Amazon Linux 2 AMI either. Cannot launch instance.")
-                         return False
-                     ami_id = sorted(images['Images'], key=lambda x: x.get('CreationDate', ''), reverse=True)[0]['ImageId']
-                     default_ssh_user = 'ec2-user' # Default for Amazon Linux
-                     logger.info(f"Using fallback Amazon Linux 2 AMI: {ami_id}")
+                if images and images.get('Images'):
+                    # Sort by creation date to get the latest one
+                    ami_id = sorted(images['Images'], key=lambda x: x.get('CreationDate', ''), reverse=True)[0]['ImageId']
+                    default_ssh_user = 'ubuntu' # Default user for Ubuntu AMIs
+                    logger.info(f"Using Ubuntu 22.04 LTS AMI: {ami_id}")
+                else:
+                    logger.warning("Could not find Ubuntu 22.04 LTS AMI. Falling back to Amazon Linux 2 AMI search...")
+                    amzn_filters = [
+                        {'Name': 'name', 'Values': ['amzn2-ami-hvm-*-x86_64-gp2']},
+                        {'Name': 'state', 'Values': ['available']},
+                        {'Name': 'architecture', 'Values': ['x86_64']},
+                        {'Name': 'virtualization-type', 'Values': ['hvm']}
+                    ]
+                    images = ec2_client.describe_images(Owners=['amazon'], Filters=amzn_filters)
+                    if not images or not images.get('Images'):
+                        logger.error("Could not find Amazon Linux 2 AMI either. Cannot launch instance.")
+                        return False
+                    ami_id = sorted(images['Images'], key=lambda x: x.get('CreationDate', ''), reverse=True)[0]['ImageId']
+                    default_ssh_user = 'ec2-user' # Default for Amazon Linux
+                    logger.info(f"Using fallback Amazon Linux 2 AMI: {ami_id}")
 
-             except ClientError as e:
-                  logger.error(f"Error finding AMI: {e}")
-                  return False
+            except ClientError as e:
+                logger.error(f"Error finding AMI: {e}")
+                return False
+            
+            if not ami_id or not default_ssh_user:
+                logger.error("Failed to determine a suitable AMI ID or default SSH user.")
+                return False
 
-             if not ami_id or not default_ssh_user:
-                  logger.error("Failed to determine a suitable AMI ID or default SSH user.")
-                  return False
+            logger.info(f"Requesting instance launch: Name='{instance_name_tag}', Type='{instance_type}', AMI='{ami_id}', Key='{key_pair_name_aws}', SG='{sg_id}'")
+            try:
+                run_response = ec2_client.run_instances(
+                    ImageId=ami_id, InstanceType=instance_type, KeyName=key_pair_name_aws, SecurityGroupIds=[sg_id], MinCount=1, MaxCount=1,
+                    TagSpecifications=[{'ResourceType': 'instance','Tags': [{'Key': 'Name', 'Value': instance_name_tag},{'Key':'CreatedBy','Value':'ai-devops-tool'}]}]
+                )
+                instance_id = run_response['Instances'][0]['InstanceId']
+                logger.info(f"Instance requested: {instance_id}. Waiting for 'running' state...")
 
-             # --- Launch Instance ---
-             logger.info(f"Requesting instance launch: Name='{instance_name_tag}', Type='{instance_type}', AMI='{ami_id}', Key='{key_pair_name_aws}', SG='{sg_id}'")
-             try:
-                 run_response = ec2_client.run_instances(
-                     ImageId=ami_id, InstanceType=instance_type, KeyName=key_pair_name_aws, SecurityGroupIds=[sg_id], MinCount=1, MaxCount=1,
-                     TagSpecifications=[{'ResourceType': 'instance','Tags': [{'Key': 'Name', 'Value': instance_name_tag},{'Key':'CreatedBy','Value':'ai-devops-tool'}]}]
-                 )
-                 instance_id = run_response['Instances'][0]['InstanceId']
-                 logger.info(f"Instance requested: {instance_id}. Waiting for 'running' state...")
+                # Wait for the instance to be running
+                waiter = ec2_client.get_waiter('instance_running');
+                waiter.wait(InstanceIds=[instance_id], WaiterConfig={'Delay': 15, 'MaxAttempts': 40}) # Wait up to 10 mins
+                logger.info(f"Instance {instance_id} is now running.")
 
-                 # Wait for the instance to be running
-                 waiter = ec2_client.get_waiter('instance_running');
-                 waiter.wait(InstanceIds=[instance_id], WaiterConfig={'Delay': 15, 'MaxAttempts': 40}) # Wait up to 10 mins
-                 logger.info(f"Instance {instance_id} is now running.")
+                # Describe the instance again to get Public IP
+                desc_response = ec2_client.describe_instances(InstanceIds=[instance_id])
+                if not desc_response or not desc_response.get('Reservations') or not desc_response['Reservations'][0].get('Instances'):
+                    logger.error("Failed to describe instance after launch.")
+                    # Attempt to terminate the potentially orphaned instance? Risky. Log and return False.
+                    return False
 
-                 # Describe the instance again to get Public IP
-                 desc_response = ec2_client.describe_instances(InstanceIds=[instance_id])
-                 if not desc_response or not desc_response.get('Reservations') or not desc_response['Reservations'][0].get('Instances'):
-                      logger.error("Failed to describe instance after launch.")
-                      # Attempt to terminate the potentially orphaned instance? Risky. Log and return False.
-                      return False
+                instance_info = desc_response['Reservations'][0]['Instances'][0]
+                public_ip = instance_info.get('PublicIpAddress')
+                public_dns = instance_info.get('PublicDnsName')
+                
+                self.created_resource_details = {
+                    'type': 'AWS EC2 Instance',
+                    'id': instance_id,
+                    'name': instance_name_tag, # Include the name used
+                    'region': region,
+                    'instance_type': instance_type,
+                    'ami_id': ami_id,
+                    'key_pair_name': key_pair_name_aws,
+                    'security_group_id': sg_id,
+                    'security_group_name': sg_name,
+                    'public_ip': public_ip,
+                    'public_dns': public_dns,
+                    'ssh_user': default_ssh_user,
+                    'ssh_key_private_path': self.ssh_key_paths.get('private', 'N/A - Check AWS Key Pair')
+                }
+                
+                logger.info(f"EC2 Instance Created Successfully:")
+                logger.info(f"  ID: {instance_id}")
+                logger.info(f"  Name: {instance_name_tag}")
+                logger.info(f"  IP: {public_ip}")
+                logger.info(f"  DNS: {public_dns}")
+                logger.info(f"  User: {default_ssh_user}")
+                logger.info(f"  Key Pair: {key_pair_name_aws}")
+                logger.info(f"  Key File Instruction: Use key corresponding to '{key_pair_name_aws}'. Path hint: {self.created_resource_details['ssh_key_private_path']}")
 
-                 instance_info = desc_response['Reservations'][0]['Instances'][0]
-                 public_ip = instance_info.get('PublicIpAddress')
-                 public_dns = instance_info.get('PublicDnsName')
-
-                 # --- Populate created_resource_details ---
-                 self.created_resource_details = {
-                     'type': 'AWS EC2 Instance',
-                     'id': instance_id,
-                     'name': instance_name_tag, # Include the name used
-                     'region': region,
-                     'instance_type': instance_type,
-                     'ami_id': ami_id,
-                     'key_pair_name': key_pair_name_aws,
-                     'security_group_id': sg_id,
-                     'security_group_name': sg_name,
-                     'public_ip': public_ip,
-                     'public_dns': public_dns,
-                     'ssh_user': default_ssh_user,
-                      # Use the path reflecting the key situation (generated or existing)
-                     'ssh_key_private_path': self.ssh_key_paths.get('private', 'N/A - Check AWS Key Pair')
-                 }
-                 logger.info(f"EC2 Instance Created Successfully:")
-                 logger.info(f"  ID: {instance_id}")
-                 logger.info(f"  Name: {instance_name_tag}")
-                 logger.info(f"  IP: {public_ip}")
-                 logger.info(f"  DNS: {public_dns}")
-                 logger.info(f"  User: {default_ssh_user}")
-                 logger.info(f"  Key Pair: {key_pair_name_aws}")
-                 logger.info(f"  Key File Instruction: Use key corresponding to '{key_pair_name_aws}'. Path hint: {self.created_resource_details['ssh_key_private_path']}")
-
-                 return True
-
-             except ClientError as e:
-                  logger.error(f"AWS API error launching or waiting for EC2 instance: {e}");
-                  # Attempt cleanup? If instance was requested, maybe try terminate? Risky.
-                  return False
-             except Exception as e: # Catch waiter errors (botocore.exceptions.WaiterError) too
-                  logger.error(f"Error launching instance or waiting for it to run: {e}", exc_info=True);
-                  return False
+                return True
+            
+            except ClientError as e:
+                logger.error(f"AWS API error launching or waiting for EC2 instance: {e}");
+                # Attempt cleanup? If instance was requested, maybe try terminate? Risky.
+                return False
+            except Exception as e: # Catch waiter errors (botocore.exceptions.WaiterError) too
+                logger.error(f"Error launching instance or waiting for it to run: {e}", exc_info=True);
+                return False
 
         except Exception as e: # Catch errors in key gen or SG setup phase
             logger.error(f"Unexpected error during EC2 instance setup: {e}", exc_info=True)
             # Ensure cleanup of generated keys if error occurred before launch attempt
             if key_temp_dir and os.path.exists(key_temp_dir):
-                 try: shutil.rmtree(key_temp_dir, onerror=remove_readonly)
-                 except Exception as cleanup_e: logger.error(f"Error cleaning up key dir during exception handling: {cleanup_e}")
+                try: shutil.rmtree(key_temp_dir, onerror=remove_readonly)
+                except Exception as cleanup_e: logger.error(f"Error cleaning up key dir during exception handling: {cleanup_e}")
             self.ssh_key_paths = {} # Clear paths on failure
             return False
-
-
+        
     def _create_aws_ecs_cluster(self, ecs_client) -> bool:
         logger.info("Executing creation of NEW ECS cluster...")
         cluster_name = self.resource_configuration.get('cluster_name')
@@ -1119,54 +1023,54 @@ class AIDevOpsAutomator:
         if not region: logger.error("AWS Region missing in configuration."); return False
 
         try:
-             logger.info(f"Attempting to create ECS Cluster '{cluster_name}' in region {region}...")
-             response = ecs_client.create_cluster(clusterName=cluster_name)
-             cluster_arn = response['cluster']['clusterArn']
-             status = response['cluster']['status']
-             self.created_resource_details = {
-                 'type': 'AWS ECS Cluster',
-                 'name': cluster_name,
-                 'arn': cluster_arn,
-                 'status': status,
-                 'region': region
-            }
-             logger.info(f"ECS Cluster created: ARN={cluster_arn}, Status={status}")
-             return True
+            logger.info(f"Attempting to create ECS Cluster '{cluster_name}' in region {region}...")
+            response = ecs_client.create_cluster(clusterName=cluster_name)
+            cluster_arn = response['cluster']['clusterArn']
+            status = response['cluster']['status']
+            self.created_resource_details = {
+                'type': 'AWS ECS Cluster',
+                'name': cluster_name,
+                'arn': cluster_arn,
+                'status': status,
+                'region': region
+        }
+            logger.info(f"ECS Cluster created: ARN={cluster_arn}, Status={status}")
+            return True
         except ClientError as e:
-             error_code = e.response['Error']['Code']
-             # Handle common case where cluster already exists
-             if error_code == 'ResourceInUseException' or (error_code == 'InvalidParameterException' and 'already exists' in str(e)):
-                  logger.warning(f"ECS Cluster '{cluster_name}' already exists. Attempting to retrieve its details.")
-                  try:
-                       # Describe the existing cluster
-                       desc_response = ecs_client.describe_clusters(clusters=[cluster_name])
-                       if desc_response.get('clusters'):
-                           existing_cluster = desc_response['clusters'][0]
-                           self.selected_resource_details = { # Store as selected, not created
-                               'type': 'AWS ECS Cluster (Existing)',
-                               'name': existing_cluster['clusterName'],
-                               'arn': existing_cluster['clusterArn'],
-                               'status': existing_cluster['status'],
-                               'region': region
-                           }
-                           # Clear created details as we used existing
-                           self.created_resource_details = {}
-                           # Update configuration to reflect existing resource
-                           self.resource_configuration['create_new'] = False
-                           self.resource_configuration['cluster_arn'] = existing_cluster['clusterArn'] # Store ARN in config too
-                           logger.info(f"Using existing ECS cluster: ARN={existing_cluster['clusterArn']}, Status={existing_cluster['status']}")
-                           return True # Success, as the desired state (cluster exists) is met
-                       else:
-                            logger.error(f"Cluster '{cluster_name}' reported as existing, but could not describe it.")
-                            return False
-                  except ClientError as desc_e:
-                       logger.error(f"Failed to describe existing cluster '{cluster_name}' after creation conflict: {desc_e}")
-                       return False
-             else:
-                  logger.error(f"AWS API error creating ECS cluster: {e}"); return False
+            error_code = e.response['Error']['Code']
+            # Handle common case where cluster already exists
+            if error_code == 'ResourceInUseException' or (error_code == 'InvalidParameterException' and 'already exists' in str(e)):
+                logger.warning(f"ECS Cluster '{cluster_name}' already exists. Attempting to retrieve its details.")
+                try:
+                    # Describe the existing cluster
+                    desc_response = ecs_client.describe_clusters(clusters=[cluster_name])
+                    if desc_response.get('clusters'):
+                        existing_cluster = desc_response['clusters'][0]
+                        self.selected_resource_details = { # Store as selected, not created
+                            'type': 'AWS ECS Cluster (Existing)',
+                            'name': existing_cluster['clusterName'],
+                            'arn': existing_cluster['clusterArn'],
+                            'status': existing_cluster['status'],
+                            'region': region
+                        }
+                        # Clear created details as we used existing
+                        self.created_resource_details = {}
+                        # Update configuration to reflect existing resource
+                        self.resource_configuration['create_new'] = False
+                        self.resource_configuration['cluster_arn'] = existing_cluster['clusterArn'] # Store ARN in config too
+                        logger.info(f"Using existing ECS cluster: ARN={existing_cluster['clusterArn']}, Status={existing_cluster['status']}")
+                        return True # Success, as the desired state (cluster exists) is met
+                    else:
+                        logger.error(f"Cluster '{cluster_name}' reported as existing, but could not describe it.")
+                        return False
+                except ClientError as desc_e:
+                    logger.error(f"Failed to describe existing cluster '{cluster_name}' after creation conflict: {desc_e}")
+                    return False
+            else:
+                logger.error(f"AWS API error creating ECS cluster: {e}"); return False
         except Exception as e:
              logger.error(f"Unexpected error creating ECS cluster: {e}", exc_info=True); return False
-
+             
     def _create_aws_lambda_function(self, lambda_client, iam_client) -> bool:
         logger.info("Executing creation of NEW Lambda function...")
         function_name = self.resource_configuration.get('function_name')
@@ -1201,168 +1105,167 @@ class AIDevOpsAutomator:
         handler_name = self.resource_configuration.get('handler', default_handler)
         role_name = f"{function_name}-execution-role"
         temp_files_to_clean = []
-
+        
         try:
              # --- IAM Role ---
-             role_arn = None
-             try:
-                  # Check if role exists
-                  role_response = iam_client.get_role(RoleName=role_name)
-                  role_arn = role_response['Role']['Arn']
-                  logger.info(f"Using existing IAM execution role: {role_name} ({role_arn})")
-             except ClientError as e:
-                  if e.response['Error']['Code'] == 'NoSuchEntity':
-                       logger.info(f"Creating new IAM execution role: {role_name}")
-                       assume_role_policy = json.dumps({
-                            "Version": "2012-10-17",
-                            "Statement": [{
-                                "Effect": "Allow",
-                                "Principal": {"Service": "lambda.amazonaws.com"},
-                                "Action": "sts:AssumeRole"
-                            }]
-                       })
-                       try:
-                            role_response = iam_client.create_role(
-                                RoleName=role_name,
-                                AssumeRolePolicyDocument=assume_role_policy,
-                                Description=f"Execution role for {function_name} Lambda created by AI DevOps tool"
-                            )
-                            role_arn = role_response['Role']['Arn']
-                            logger.info(f"Created role {role_name}. Attaching basic execution policy...")
-                            # Attach AWSLambdaBasicExecutionRole policy
-                            policy_arn = 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
-                            iam_client.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
-                            logger.info(f"Attached policy {policy_arn}. Waiting for IAM propagation...")
-                            time.sleep(15) # IAM changes can take time to propagate
-                       except ClientError as create_err:
-                            logger.error(f"Failed to create or attach policy to IAM role {role_name}: {create_err}")
-                            return False
-                  else:
-                       logger.error(f"Error checking/creating IAM role {role_name}: {e}")
-                       raise # Re-raise unexpected errors
+            role_arn = None
+            try:
+                # Check if role exists
+                role_response = iam_client.get_role(RoleName=role_name)
+                role_arn = role_response['Role']['Arn']
+                logger.info(f"Using existing IAM execution role: {role_name} ({role_arn})")
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'NoSuchEntity':
+                    logger.info(f"Creating new IAM execution role: {role_name}")
+                    assume_role_policy = json.dumps({
+                        "Version": "2012-10-17",
+                        "Statement": [{
+                            "Effect": "Allow",
+                            "Principal": {"Service": "lambda.amazonaws.com"},
+                            "Action": "sts:AssumeRole"
+                        }]
+                    })
+                    try:
+                        role_response = iam_client.create_role(
+                            RoleName=role_name,
+                            AssumeRolePolicyDocument=assume_role_policy,
+                            Description=f"Execution role for {function_name} Lambda created by AI DevOps tool"
+                        )
+                        role_arn = role_response['Role']['Arn']
+                        logger.info(f"Created role {role_name}. Attaching basic execution policy...")
+                        # Attach AWSLambdaBasicExecutionRole policy
+                        policy_arn = 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+                        iam_client.attach_role_policy(RoleName=role_name, PolicyArn=policy_arn)
+                        logger.info(f"Attached policy {policy_arn}. Waiting for IAM propagation...")
+                        time.sleep(15) # IAM changes can take time to propagate
+                    except ClientError as create_err:
+                        logger.error(f"Failed to create or attach policy to IAM role {role_name}: {create_err}")
+                        return False
+                else:
+                    logger.error(f"Error checking/creating IAM role {role_name}: {e}")
+                    raise # Re-raise unexpected errors
 
-             if not role_arn: logger.error("Failed to get or create IAM role ARN."); return False
+            if not role_arn: logger.error("Failed to get or create IAM role ARN."); return False
 
-             # --- Dummy Code Package ---
-             # Create a minimal valid code package for the specified runtime
-             dummy_content, dummy_filename = "", ""
-             if runtime.startswith('python'):
-                  dummy_filename = "lambda_function.py"
-                  dummy_content = "import json\n\ndef lambda_handler(event, context):\n    print('Hello from AI DevOps Lambda!')\n    return {'statusCode': 200, 'body': json.dumps('Success!')}\n"
-             elif runtime.startswith('nodejs'):
-                  dummy_filename = "index.js"
-                  dummy_content = "exports.handler = async (event) => {\n    console.log('Hello from AI DevOps Lambda!');\n    const response = { statusCode: 200, body: JSON.stringify('Success!') };\n    return response;\n};"
-             elif runtime.startswith('java'):
-                  # Java requires a compiled JAR/ZIP. Creating a dummy source is complex.
-                  # For now, we'll skip the dummy code creation for Java. The create_function call will likely fail
-                  # without a valid Code.S3Bucket/S3Key or ZipFile. This needs enhancement.
-                  logger.error("Dummy code generation for Java runtime is not implemented. Cannot create function without pre-existing code package.")
-                  # TODO: Implement dummy JAR creation or require S3 location for Java
-                  return False
-             elif runtime.startswith('go'):
-                  dummy_filename = "main.go" # Go handler name defaults to executable name
-                  handler_name = "main" # Often compiled executable name
-                  dummy_content = "package main\n\nimport (\n\t\"fmt\"\n\t\"github.com/aws/aws-lambda-go/lambda\"\n)\n\ntype MyEvent struct {\n\tName string `json:\"name\"`\n}\n\nfunc HandleRequest(event MyEvent) (string, error) {\n\tfmt.Println(\"Hello from AI DevOps Lambda!\")\n\treturn fmt.Sprintf(\"Success, %s!\", event.Name), nil\n}\n\nfunc main() {\n\tlambda.Start(HandleRequest)\n}\n"
-                  # Go needs compilation. We cannot create a zip directly here easily.
-                  logger.error("Dummy code generation for Go runtime requires compilation. Cannot create function without pre-existing code package.")
-                  # TODO: Implement dummy Go build/zip or require S3 location
-                  return False
-             # Add cases for other runtimes as needed
-             else:
-                  logger.error(f"Dummy code generation for runtime '{runtime}' is not implemented.")
-                  return False
+            # --- Dummy Code Package ---
+            # Create a minimal valid code package for the specified runtime
+            dummy_content, dummy_filename = "", ""
+            if runtime.startswith('python'):
+                dummy_filename = "lambda_function.py"
+                dummy_content = "import json\n\ndef lambda_handler(event, context):\n    print('Hello from AI DevOps Lambda!')\n    return {'statusCode': 200, 'body': json.dumps('Success!')}\n"
+            elif runtime.startswith('nodejs'):
+                dummy_filename = "index.js"
+                dummy_content = "exports.handler = async (event) => {\n    console.log('Hello from AI DevOps Lambda!');\n    const response = { statusCode: 200, body: JSON.stringify('Success!') };\n    return response;\n};"
+            elif runtime.startswith('java'):
+                # Java requires a compiled JAR/ZIP. Creating a dummy source is complex.
+                # For now, we'll skip the dummy code creation for Java. The create_function call will likely fail
+                # without a valid Code.S3Bucket/S3Key or ZipFile. This needs enhancement.
+                logger.error("Dummy code generation for Java runtime is not implemented. Cannot create function without pre-existing code package.")
+                # TODO: Implement dummy JAR creation or require S3 location for Java
+                return False
+            elif runtime.startswith('go'):
+                dummy_filename = "main.go" # Go handler name defaults to executable name
+                handler_name = "main" # Often compiled executable name
+                dummy_content = "package main\n\nimport (\n\t\"fmt\"\n\t\"github.com/aws/aws-lambda-go/lambda\"\n)\n\ntype MyEvent struct {\n\tName string `json:\"name\"`\n}\n\nfunc HandleRequest(event MyEvent) (string, error) {\n\tfmt.Println(\"Hello from AI DevOps Lambda!\")\n\treturn fmt.Sprintf(\"Success, %s!\", event.Name), nil\n}\n\nfunc main() {\n\tlambda.Start(HandleRequest)\n}\n"
+                # Go needs compilation. We cannot create a zip directly here easily.
+                logger.error("Dummy code generation for Go runtime requires compilation. Cannot create function without pre-existing code package.")
+                # TODO: Implement dummy Go build/zip or require S3 location
+                return False
+            # Add cases for other runtimes as needed
+            else:
+                logger.error(f"Dummy code generation for runtime '{runtime}' is not implemented.")
+                return False
 
-             temp_code_dir = tempfile.mkdtemp(prefix="ai-devops-lambda-code-")
-             temp_files_to_clean.append(temp_code_dir) # Add dir for cleanup
-             zip_path = os.path.join(temp_code_dir, f"{function_name}_dummy.zip")
-             dummy_file_path = os.path.join(temp_code_dir, dummy_filename)
+            temp_code_dir = tempfile.mkdtemp(prefix="ai-devops-lambda-code-")
+            temp_files_to_clean.append(temp_code_dir) # Add dir for cleanup
+            zip_path = os.path.join(temp_code_dir, f"{function_name}_dummy.zip")
+            dummy_file_path = os.path.join(temp_code_dir, dummy_filename)
 
-             try:
-                  with open(dummy_file_path, 'w') as f: f.write(dummy_content)
-                  import zipfile
-                  with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                       zf.write(dummy_file_path, arcname=dummy_filename) # Write file into zip root
-                  logger.info(f"Created dummy code package at: {zip_path}")
-                  with open(zip_path, 'rb') as f: zip_content_bytes = f.read()
-             except Exception as zip_e:
-                  logger.error(f"Failed to create dummy code zip package: {zip_e}")
-                  return False # Cleanup will happen in finally block
+            try:
+                with open(dummy_file_path, 'w') as f: f.write(dummy_content)
+                import zipfile
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    zf.write(dummy_file_path, arcname=dummy_filename) # Write file into zip root
+                logger.info(f"Created dummy code package at: {zip_path}")
+                with open(zip_path, 'rb') as f: zip_content_bytes = f.read()
+            except Exception as zip_e:
+                logger.error(f"Failed to create dummy code zip package: {zip_e}")
+                return False # Cleanup will happen in finally block
 
-             # --- Create Lambda Function ---
-             logger.info(f"Creating Lambda function '{function_name}' (Runtime: {runtime}, Handler: {handler_name}, Memory: {memory}MB)...")
-             try:
-                  create_response = lambda_client.create_function(
-                      FunctionName=function_name,
-                      Runtime=runtime,
-                      Role=role_arn,
-                      Handler=handler_name,
-                      Code={'ZipFile': zip_content_bytes},
-                      MemorySize=memory,
-                      Timeout=30, # Reasonable default timeout
-                      Publish=True, # Publish a version immediately
-                      Tags={'CreatedBy': 'ai-devops-tool'}
-                  )
-                  function_arn = create_response['FunctionArn']
-                  function_version = create_response.get('Version', '1') # Get published version
-                  logger.info(f"Lambda function created: ARN={function_arn}, Version={function_version}")
+            # --- Create Lambda Function ---
+            logger.info(f"Creating Lambda function '{function_name}' (Runtime: {runtime}, Handler: {handler_name}, Memory: {memory}MB)...")
+            try:
+                create_response = lambda_client.create_function(
+                    FunctionName=function_name,
+                    Runtime=runtime,
+                    Role=role_arn,
+                    Handler=handler_name,
+                    Code={'ZipFile': zip_content_bytes},
+                    MemorySize=memory,
+                    Timeout=30, # Reasonable default timeout
+                    Publish=True, # Publish a version immediately
+                    Tags={'CreatedBy': 'ai-devops-tool'}
+                )
+                function_arn = create_response['FunctionArn']
+                function_version = create_response.get('Version', '1') # Get published version
+                logger.info(f"Lambda function created: ARN={function_arn}, Version={function_version}")
 
-                  self.created_resource_details = {
-                      'type': 'AWS Lambda Function',
-                      'name': function_name,
-                      'arn': function_arn,
-                      'version': function_version,
-                      'runtime': runtime,
-                      'memory': memory,
-                      'timeout': 30,
-                      'handler': handler_name,
-                      'role_arn': role_arn,
-                      'region': region
-                  }
-                  return True
+                self.created_resource_details = {
+                    'type': 'AWS Lambda Function',
+                    'name': function_name,
+                    'arn': function_arn,
+                    'version': function_version,
+                    'runtime': runtime,
+                    'memory': memory,
+                    'timeout': 30,
+                    'handler': handler_name,
+                    'role_arn': role_arn,
+                    'region': region
+                }
+                return True
 
-             except ClientError as e:
-                  error_code = e.response['Error']['Code']
-                  if error_code == 'ResourceConflictException':
-                       logger.warning(f"Lambda function '{function_name}' already exists. Attempting to retrieve details.")
-                       try:
-                           func_data = lambda_client.get_function(FunctionName=function_name)['Configuration']
-                           self.selected_resource_details = { # Store as selected
-                               'type': 'AWS Lambda Function (Existing)',
-                               'name': func_data['FunctionName'],
-                               'arn': func_data['FunctionArn'],
-                               'version': func_data.get('Version', 'LATEST'),
-                               'runtime': func_data['Runtime'],
-                               'memory': func_data['MemorySize'],
-                               'timeout': func_data['Timeout'],
-                               'handler': func_data['Handler'],
-                               'role_arn': func_data['Role'],
-                               'region': region
-                           }
-                           self.created_resource_details = {} # Clear created details
-                           self.resource_configuration['create_new'] = False # Update config
-                           logger.info(f"Using existing Lambda function: ARN={func_data['FunctionArn']}")
-                           return True # Success, desired state met
-                       except ClientError as get_e:
-                           logger.error(f"Function '{function_name}' reported as existing, but failed to retrieve details: {get_e}")
-                           return False
-                  elif error_code == 'InvalidParameterValueException':
-                      logger.error(f"Invalid parameter creating Lambda function: {e}. Check role propagation, runtime, handler, or code package.")
-                      return False
-                  else:
-                       logger.error(f"AWS API error creating Lambda function: {e}"); return False
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                if error_code == 'ResourceConflictException':
+                    logger.warning(f"Lambda function '{function_name}' already exists. Attempting to retrieve details.")
+                    try:
+                        func_data = lambda_client.get_function(FunctionName=function_name)['Configuration']
+                        self.selected_resource_details = { # Store as selected
+                            'type': 'AWS Lambda Function (Existing)',
+                            'name': func_data['FunctionName'],
+                            'arn': func_data['FunctionArn'],
+                            'version': func_data.get('Version', 'LATEST'),
+                            'runtime': func_data['Runtime'],
+                            'memory': func_data['MemorySize'],
+                            'timeout': func_data['Timeout'],
+                            'handler': func_data['Handler'],
+                            'role_arn': func_data['Role'],
+                            'region': region
+                        }
+                        self.created_resource_details = {} # Clear created details
+                        self.resource_configuration['create_new'] = False # Update config
+                        logger.info(f"Using existing Lambda function: ARN={func_data['FunctionArn']}")
+                        return True # Success, desired state met
+                    except ClientError as get_e:
+                        logger.error(f"Function '{function_name}' reported as existing, but failed to retrieve details: {get_e}")
+                        return False
+                elif error_code == 'InvalidParameterValueException':
+                    logger.error(f"Invalid parameter creating Lambda function: {e}. Check role propagation, runtime, handler, or code package.")
+                    return False
+                else:
+                    logger.error(f"AWS API error creating Lambda function: {e}"); return False
 
         except Exception as e:
              logger.error(f"Unexpected error creating Lambda function: {e}", exc_info=True); return False
         finally:
             # --- Cleanup Temporary Code Files ---
             for path in temp_files_to_clean:
-                 if os.path.isdir(path):
-                      try: shutil.rmtree(path, onerror=remove_readonly); logger.debug(f"Cleaned up temp dir: {path}")
-                      except Exception as clean_e: logger.warning(f"Could not cleanup temp code directory {path}: {clean_e}")
-                 elif os.path.isfile(path):
-                      try: os.remove(path); logger.debug(f"Cleaned up temp file: {path}")
-                      except Exception as clean_e: logger.warning(f"Could not cleanup temp code file {path}: {clean_e}")
-
+                if os.path.isdir(path):
+                    try: shutil.rmtree(path, onerror=remove_readonly); logger.debug(f"Cleaned up temp dir: {path}")
+                    except Exception as clean_e: logger.warning(f"Could not cleanup temp code directory {path}: {clean_e}")
+                elif os.path.isfile(path):
+                    try: os.remove(path); logger.debug(f"Cleaned up temp file: {path}")
+                    except Exception as clean_e: logger.warning(f"Could not cleanup temp code file {path}: {clean_e}")
 
     def _create_azure_vm(self, compute_client, network_client, resource_client) -> bool:
         logger.info("Executing creation of NEW Azure VM...")
@@ -1378,195 +1281,195 @@ class AIDevOpsAutomator:
 
         # Ensure resource group exists (create if not) - Best practice
         try:
-             logger.info(f"Ensuring Resource Group '{rg_name}' exists in {location}...")
-             resource_client.resource_groups.create_or_update(rg_name, {'location': location})
-             logger.info(f"Resource Group '{rg_name}' ensured.")
+            logger.info(f"Ensuring Resource Group '{rg_name}' exists in {location}...")
+            resource_client.resource_groups.create_or_update(rg_name, {'location': location})
+            logger.info(f"Resource Group '{rg_name}' ensured.")
         except Exception as rg_e:
-             logger.error(f"Failed to create or update Resource Group '{rg_name}': {rg_e}"); return False
+            logger.error(f"Failed to create or update Resource Group '{rg_name}': {rg_e}"); return False
 
         key_name_base = f"ai-devops-{vm_name}-key"
         key_temp_dir = None
 
         try:
-             # --- SSH Key Generation ---
-             private_key_path, public_key_content, _, temp_key_dir = generate_ssh_key_pair(key_name_base)
-             if not private_key_path or not public_key_content or not temp_key_dir:
-                  logger.error("Failed to generate SSH key pair for Azure VM."); return False
-             key_temp_dir = temp_key_dir # Track for cleanup
-             key_filename_base = key_name_base  # Define key_filename_base based on key_name_base
-             self.ssh_key_paths = { # Store generated key details
-                 'private': private_key_path,
-                 'public': os.path.join(temp_key_dir, f"{key_filename_base}.pub"),
-                 'key_name': key_name_base, # Use base name as reference
-                 'temp_dir': temp_key_dir
-             }
-             logger.debug(f"SSH key generated for Azure VM: {self.ssh_key_paths}")
+            # --- SSH Key Generation ---
+            private_key_path, public_key_content, _, temp_key_dir = generate_ssh_key_pair(key_name_base)
+            if not private_key_path or not public_key_content or not temp_key_dir:
+                logger.error("Failed to generate SSH key pair for Azure VM."); return False
+            key_temp_dir = temp_key_dir # Track for cleanup
+            key_filename_base = key_name_base  # Define key_filename_base based on key_name_base
+            self.ssh_key_paths = { # Store generated key details
+                'private': private_key_path,
+                'public': os.path.join(temp_key_dir, f"{key_filename_base}.pub"),
+                'key_name': key_name_base, # Use base name as reference
+                'temp_dir': temp_key_dir
+            }
+            logger.debug(f"SSH key generated for Azure VM: {self.ssh_key_paths}")
 
-             # --- Network Resources (VNet, Subnet, PIP, NIC, NSG) ---
-             vnet_name = f"{vm_name}-vnet"
-             subnet_name = "default"
-             public_ip_name = f"{vm_name}-pip"
-             nic_name = f"{vm_name}-nic"
-             nsg_name = f"{vm_name}-nsg"
-             logger.info("Ensuring Azure network resources (VNet, Subnet, Public IP, NSG, NIC)...")
+            # --- Network Resources (VNet, Subnet, PIP, NIC, NSG) ---
+            vnet_name = f"{vm_name}-vnet"
+            subnet_name = "default"
+            public_ip_name = f"{vm_name}-pip"
+            nic_name = f"{vm_name}-nic"
+            nsg_name = f"{vm_name}-nsg"
+            logger.info("Ensuring Azure network resources (VNet, Subnet, Public IP, NSG, NIC)...")
 
-             try:
-                 # VNet
-                 logger.debug(f"Checking/Creating VNet: {vnet_name}")
-                 vnet_poller = network_client.virtual_networks.begin_create_or_update(rg_name,vnet_name,{"location":location,"address_space":{"address_prefixes":["10.0.0.0/16"]}})
-                 vnet_result = vnet_poller.result()
-                 logger.debug(f"VNet '{vnet_name}' ensured.")
+            try:
+                # VNet
+                logger.debug(f"Checking/Creating VNet: {vnet_name}")
+                vnet_poller = network_client.virtual_networks.begin_create_or_update(rg_name,vnet_name,{"location":location,"address_space":{"address_prefixes":["10.0.0.0/16"]}})
+                vnet_result = vnet_poller.result()
+                logger.debug(f"VNet '{vnet_name}' ensured.")
 
-                 # Subnet
-                 logger.debug(f"Checking/Creating Subnet: {subnet_name} in {vnet_name}")
-                 subnet_poller = network_client.subnets.begin_create_or_update(rg_name,vnet_name,subnet_name,{"address_prefix":"10.0.0.0/24"})
-                 subnet_result = subnet_poller.result()
-                 logger.debug(f"Subnet '{subnet_name}' ensured.")
+                # Subnet
+                logger.debug(f"Checking/Creating Subnet: {subnet_name} in {vnet_name}")
+                subnet_poller = network_client.subnets.begin_create_or_update(rg_name,vnet_name,subnet_name,{"address_prefix":"10.0.0.0/24"})
+                subnet_result = subnet_poller.result()
+                logger.debug(f"Subnet '{subnet_name}' ensured.")
 
-                 # Public IP
-                 logger.debug(f"Checking/Creating Public IP: {public_ip_name}")
-                 pip_poller = network_client.public_ip_addresses.begin_create_or_update(rg_name,public_ip_name,{"location":location,"sku":{"name":"Standard"},"public_ip_allocation_method":"Static", "tags": {"CreatedBy": "ai-devops-tool"}})
-                 pip_result = pip_poller.result()
-                 logger.debug(f"Public IP '{public_ip_name}' ensured. IP: {pip_result.ip_address}")
+                # Public IP
+                logger.debug(f"Checking/Creating Public IP: {public_ip_name}")
+                pip_poller = network_client.public_ip_addresses.begin_create_or_update(rg_name,public_ip_name,{"location":location,"sku":{"name":"Standard"},"public_ip_allocation_method":"Static", "tags": {"CreatedBy": "ai-devops-tool"}})
+                pip_result = pip_poller.result()
+                logger.debug(f"Public IP '{public_ip_name}' ensured. IP: {pip_result.ip_address}")
 
-                 # Network Security Group (NSG)
-                 logger.debug(f"Checking/Creating NSG: {nsg_name}")
-                 nsg_poller = network_client.network_security_groups.begin_create_or_update(
-                     rg_name, nsg_name, {"location": location, "tags": {"CreatedBy": "ai-devops-tool"}}
-                 )
-                 nsg_result = nsg_poller.result()
-                 logger.debug(f"NSG '{nsg_name}' ensured.")
+                # Network Security Group (NSG)
+                logger.debug(f"Checking/Creating NSG: {nsg_name}")
+                nsg_poller = network_client.network_security_groups.begin_create_or_update(
+                    rg_name, nsg_name, {"location": location, "tags": {"CreatedBy": "ai-devops-tool"}}
+                )
+                nsg_result = nsg_poller.result()
+                logger.debug(f"NSG '{nsg_name}' ensured.")
 
-                 # NSG Rule for SSH (Port 22)
-                 ssh_rule_name = "AllowSSH"
-                 logger.debug(f"Checking/Creating NSG Rule: {ssh_rule_name} in {nsg_name}")
-                 rule_poller = network_client.security_rules.begin_create_or_update(
-                     rg_name, nsg_name, ssh_rule_name, {
-                         "protocol": "Tcp",
-                         "source_address_prefix": "*", # Be careful in production, restrict this
-                         "destination_address_prefix": "*",
-                         "access": "Allow",
-                         "direction": "Inbound",
-                         "source_port_range": "*",
-                         "destination_port_range": "22",
-                         "priority": 100 # Lower number = higher priority
-                     }
-                 )
-                 rule_poller.result()
-                 logger.debug(f"NSG Rule '{ssh_rule_name}' ensured.")
-                 # Add rules for HTTP/HTTPS if needed here
+                # NSG Rule for SSH (Port 22)
+                ssh_rule_name = "AllowSSH"
+                logger.debug(f"Checking/Creating NSG Rule: {ssh_rule_name} in {nsg_name}")
+                rule_poller = network_client.security_rules.begin_create_or_update(
+                    rg_name, nsg_name, ssh_rule_name, {
+                        "protocol": "Tcp",
+                        "source_address_prefix": "*", # Be careful in production, restrict this
+                        "destination_address_prefix": "*",
+                        "access": "Allow",
+                        "direction": "Inbound",
+                        "source_port_range": "*",
+                        "destination_port_range": "22",
+                        "priority": 100 # Lower number = higher priority
+                    }
+                )
+                rule_poller.result()
+                logger.debug(f"NSG Rule '{ssh_rule_name}' ensured.")
+                # Add rules for HTTP/HTTPS if needed here
 
-                 # Network Interface (NIC)
-                 logger.debug(f"Checking/Creating NIC: {nic_name}")
-                 nic_poller = network_client.network_interfaces.begin_create_or_update(rg_name,nic_name,{
-                     "location":location,
-                     "ip_configurations":[{
-                         "name":"ipconfig1",
-                         "subnet":{"id": subnet_result.id},
-                         "public_ip_address":{"id": pip_result.id}
-                     }],
-                     "network_security_group": {"id": nsg_result.id}, # Associate NSG
-                     "tags": {"CreatedBy": "ai-devops-tool"}
-                 })
-                 nic_result = nic_poller.result()
-                 logger.info("Azure network resources ready.")
+                # Network Interface (NIC)
+                logger.debug(f"Checking/Creating NIC: {nic_name}")
+                nic_poller = network_client.network_interfaces.begin_create_or_update(rg_name,nic_name,{
+                    "location":location,
+                    "ip_configurations":[{
+                        "name":"ipconfig1",
+                        "subnet":{"id": subnet_result.id},
+                        "public_ip_address":{"id": pip_result.id}
+                    }],
+                    "network_security_group": {"id": nsg_result.id}, # Associate NSG
+                    "tags": {"CreatedBy": "ai-devops-tool"}
+                })
+                nic_result = nic_poller.result()
+                logger.info("Azure network resources ready.")
 
-             except azure.core.exceptions.HttpResponseError as net_e:
-                  logger.error(f"Azure API error creating network resources: {net_e.message}"); return False
-             except Exception as net_e:
-                  logger.error(f"Unexpected error creating Azure network resources: {net_e}", exc_info=True); return False
+            except azure.core.exceptions.HttpResponseError as net_e:
+                logger.error(f"Azure API error creating network resources: {net_e.message}"); return False
+            except Exception as net_e:
+                logger.error(f"Unexpected error creating Azure network resources: {net_e}", exc_info=True); return False
 
 
-             # --- VM Configuration ---
-             # Use a common Ubuntu LTS image
-             image_reference = {"publisher":"Canonical","offer":"0001-com-ubuntu-server-jammy","sku":"22_04-lts-gen2","version":"latest"}
-             logger.info(f"Using VM Image: {image_reference['publisher']}/{image_reference['offer']}/{image_reference['sku']}/{image_reference['version']}")
+            # --- VM Configuration ---
+            # Use a common Ubuntu LTS image
+            image_reference = {"publisher":"Canonical","offer":"0001-com-ubuntu-server-jammy","sku":"22_04-lts-gen2","version":"latest"}
+            logger.info(f"Using VM Image: {image_reference['publisher']}/{image_reference['offer']}/{image_reference['sku']}/{image_reference['version']}")
 
-             vm_parameters = {
-                  "location": location,
-                  "tags": {"CreatedBy": "ai-devops-tool"},
-                  "properties": {
-                       "hardwareProfile": {"vmSize": vm_size},
-                       "storageProfile": {
-                           "imageReference": image_reference,
-                           "osDisk": {
-                               "createOption":"FromImage",
-                               "managedDisk":{"storageAccountType":"Standard_LRS"} # Standard HDD, use StandardSSD_LRS or Premium_LRS for better performance
-                           }
-                       },
-                       "osProfile": {
-                           "computerName": vm_name, # Hostname inside the VM
-                           "adminUsername": admin_username,
-                           "linuxConfiguration":{
-                               "disablePasswordAuthentication": True,
-                               "ssh":{
-                                   "publicKeys":[{
-                                       "path":f"/home/{admin_username}/.ssh/authorized_keys",
-                                       "keyData": public_key_content
-                                   }]
-                               }
-                           }
-                       },
-                       "networkProfile": {
-                           "networkInterfaces": [{"id": nic_result.id}] # Reference the created NIC
-                       }
-                  }
-             }
+            vm_parameters = {
+                "location": location,
+                "tags": {"CreatedBy": "ai-devops-tool"},
+                "properties": {
+                    "hardwareProfile": {"vmSize": vm_size},
+                    "storageProfile": {
+                        "imageReference": image_reference,
+                        "osDisk": {
+                            "createOption":"FromImage",
+                            "managedDisk":{"storageAccountType":"Standard_LRS"} # Standard HDD, use StandardSSD_LRS or Premium_LRS for better performance
+                        }
+                    },
+                    "osProfile": {
+                        "computerName": vm_name, # Hostname inside the VM
+                        "adminUsername": admin_username,
+                        "linuxConfiguration":{
+                            "disablePasswordAuthentication": True,
+                            "ssh":{
+                                "publicKeys":[{
+                                    "path":f"/home/{admin_username}/.ssh/authorized_keys",
+                                    "keyData": public_key_content
+                                }]
+                            }
+                        }
+                    },
+                    "networkProfile": {
+                        "networkInterfaces": [{"id": nic_result.id}] # Reference the created NIC
+                    }
+                }
+            }
 
-             # --- Create VM ---
-             logger.info(f"Creating Azure VM '{vm_name}' (Size: {vm_size}). This may take a few minutes...")
-             try:
-                 vm_poller = compute_client.virtual_machines.begin_create_or_update(rg_name, vm_name, vm_parameters)
-                 vm_result = vm_poller.result() # Wait for completion
-                 logger.info(f"VM '{vm_name}' creation polling finished. Status: {vm_poller.status()}")
+            # --- Create VM ---
+            logger.info(f"Creating Azure VM '{vm_name}' (Size: {vm_size}). This may take a few minutes...")
+            try:
+                vm_poller = compute_client.virtual_machines.begin_create_or_update(rg_name, vm_name, vm_parameters)
+                vm_result = vm_poller.result() # Wait for completion
+                logger.info(f"VM '{vm_name}' creation polling finished. Status: {vm_poller.status()}")
 
-                 if vm_poller.status().lower() != 'succeeded':
-                      logger.error(f"Azure VM creation polling finished with status: {vm_poller.status()}. Check Azure portal for details.")
-                      # Attempt to get error details if available
-                      # final_poller_state = vm_poller.polling_method()._initial_response.context['azure_async_operation'] # Example, might change
-                      # logger.error(f"Polling state: {final_poller_state}")
-                      return False
+                if vm_poller.status().lower() != 'succeeded':
+                    logger.error(f"Azure VM creation polling finished with status: {vm_poller.status()}. Check Azure portal for details.")
+                    # Attempt to get error details if available
+                    # final_poller_state = vm_poller.polling_method()._initial_response.context['azure_async_operation'] # Example, might change
+                    # logger.error(f"Polling state: {final_poller_state}")
+                    return False
 
-                 # Get updated IP address after creation (it might not be available on the first PIP result)
-                 final_pip_details = network_client.public_ip_addresses.get(rg_name, public_ip_name)
-                 public_ip_address = final_pip_details.ip_address if final_pip_details else "N/A"
+                # Get updated IP address after creation (it might not be available on the first PIP result)
+                final_pip_details = network_client.public_ip_addresses.get(rg_name, public_ip_name)
+                public_ip_address = final_pip_details.ip_address if final_pip_details else "N/A"
 
-                 self.created_resource_details = {
-                      'type': 'Azure VM',
-                      'name': vm_result.name,
-                      'id': vm_result.id,
-                      'resource_group': rg_name,
-                      'location': location,
-                      'size': vm_size,
-                      'public_ip': public_ip_address,
-                      'admin_username': admin_username,
-                      # Provide the path to the *generated* private key
-                      'ssh_key_private_path': self.ssh_key_paths.get('private')
-                 }
-                 logger.info(f"Azure VM Created Successfully:")
-                 logger.info(f"  Name: {vm_result.name}")
-                 logger.info(f"  ID: {vm_result.id}")
-                 logger.info(f"  IP: {public_ip_address}")
-                 logger.info(f"  User: {admin_username}")
-                 logger.info(f"  Key File Instruction: Use the generated key at '{self.created_resource_details['ssh_key_private_path']}'")
+                self.created_resource_details = {
+                    'type': 'Azure VM',
+                    'name': vm_result.name,
+                    'id': vm_result.id,
+                    'resource_group': rg_name,
+                    'location': location,
+                    'size': vm_size,
+                    'public_ip': public_ip_address,
+                    'admin_username': admin_username,
+                    # Provide the path to the *generated* private key
+                    'ssh_key_private_path': self.ssh_key_paths.get('private')
+                }
+                logger.info(f"Azure VM Created Successfully:")
+                logger.info(f"  Name: {vm_result.name}")
+                logger.info(f"  ID: {vm_result.id}")
+                logger.info(f"  IP: {public_ip_address}")
+                logger.info(f"  User: {admin_username}")
+                logger.info(f"  Key File Instruction: Use the generated key at '{self.created_resource_details['ssh_key_private_path']}'")
 
-                 return True
+                return True
 
-             except azure.core.exceptions.HttpResponseError as vm_e:
-                  logger.error(f"Azure API error creating VM: {vm_e.message}"); return False
-             except Exception as vm_e:
-                  logger.error(f"Unexpected error creating Azure VM: {vm_e}", exc_info=True); return False
+            except azure.core.exceptions.HttpResponseError as vm_e:
+                logger.error(f"Azure API error creating VM: {vm_e.message}"); return False
+            except Exception as vm_e:
+                logger.error(f"Unexpected error creating Azure VM: {vm_e}", exc_info=True); return False
 
         except Exception as e: # Catch errors in key gen or initial RG check phase
             logger.error(f"Unexpected error during Azure VM setup: {e}", exc_info=True)
             return False
         finally:
              # Cleanup generated SSH key temp dir
-             if key_temp_dir and os.path.exists(key_temp_dir):
-                  try: shutil.rmtree(key_temp_dir, onerror=remove_readonly)
-                  except Exception as cleanup_e: logger.warning(f"Could not cleanup temp key directory {key_temp_dir}: {cleanup_e}")
+            if key_temp_dir and os.path.exists(key_temp_dir):
+                try: shutil.rmtree(key_temp_dir, onerror=remove_readonly)
+                except Exception as cleanup_e: logger.warning(f"Could not cleanup temp key directory {key_temp_dir}: {cleanup_e}")
              # Clear paths even if cleanup failed directory removal
-             self.ssh_key_paths = {}
+            self.ssh_key_paths = {}
 
     def _create_gcp_vm(self, compute_client: compute_v1.InstancesClient, credentials, project_id: str) -> bool:
         logger.info("Executing creation of NEW GCP VM...")
@@ -1586,13 +1489,13 @@ class AIDevOpsAutomator:
             # --- SSH Key Generation ---
             private_key_path, public_key_content, _, temp_key_dir = generate_ssh_key_pair(key_name_base)
             if not private_key_path or not public_key_content or not temp_key_dir:
-                 logger.error("Failed to generate SSH key pair for GCP VM."); return False
+                logger.error("Failed to generate SSH key pair for GCP VM."); return False
             key_temp_dir = temp_key_dir # Track for cleanup
             self.ssh_key_paths = { # Store generated key details
-                 'private': private_key_path,
-                 'public': os.path.join(temp_key_dir, f"{key_filename_base}.pub"),
-                 'key_name': key_name_base, # Use base name as reference
-                 'temp_dir': temp_key_dir
+                'private': private_key_path,
+                'public': os.path.join(temp_key_dir, f"{key_filename_base}.pub"),
+                'key_name': key_name_base, # Use base name as reference
+                'temp_dir': temp_key_dir
             }
             # Format for GCP metadata: username:key_content
             ssh_key_metadata_value = f"{ssh_user}:{public_key_content}"
@@ -1608,8 +1511,8 @@ class AIDevOpsAutomator:
                 source_disk_image = latest_image.self_link
                 logger.info(f"Using GCP Image: {source_disk_image}")
             except Exception as img_e:
-                 logger.error(f"Failed to get GCP image {image_family} from {image_project}: {img_e}")
-                 return False
+                logger.error(f"Failed to get GCP image {image_family} from {image_project}: {img_e}")
+                return False
 
             # --- Machine Type URL ---
             machine_type_url = f"projects/{project_id}/zones/{zone}/machineTypes/{machine_type}"
@@ -1657,19 +1560,19 @@ class AIDevOpsAutomator:
                 start_time = time.time()
                 timeout_seconds = 300
                 while time.time() - start_time < timeout_seconds:
-                     op_result = operation_client.get(project=project_id, zone=zone, operation=operation.name)
-                     if op_result.status == compute_v1.Operation.Status.DONE:
-                          if op_result.error:
-                               error_msg = f"Instance creation failed: {op_result.error.errors[0].message if op_result.error.errors else 'Unknown error'}"
-                               logger.error(error_msg)
-                               raise google_exceptions.GoogleAPICallError(error_msg) # Raise error to be caught below
-                          logger.info("Instance creation operation finished successfully.")
-                          break
-                     time.sleep(10) # Poll every 10 seconds
+                    op_result = operation_client.get(project=project_id, zone=zone, operation=operation.name)
+                    if op_result.status == compute_v1.Operation.Status.DONE:
+                        if op_result.error:
+                            error_msg = f"Instance creation failed: {op_result.error.errors[0].message if op_result.error.errors else 'Unknown error'}"
+                            logger.error(error_msg)
+                            raise google_exceptions.GoogleAPICallError(error_msg) # Raise error to be caught below
+                        logger.info("Instance creation operation finished successfully.")
+                        break
+                    time.sleep(10) # Poll every 10 seconds
                 else: # Loop finished without break (timeout)
-                     logger.error(f"Timeout waiting for instance creation operation {operation.name} to complete.")
+                    logger.error(f"Timeout waiting for instance creation operation {operation.name} to complete.")
                      # Try to delete the potentially half-created instance? Risky.
-                     return False
+                    return False
 
                 # --- Get Instance Details (including IP) ---
                 instance_details = compute_client.get(project=project_id, zone=zone, instance=instance_name)
@@ -1699,7 +1602,7 @@ class AIDevOpsAutomator:
             except google_exceptions.GoogleAPICallError as e:
                 logger.error(f"GCP API error during instance creation or waiting: {e}"); return False
             except Exception as e:
-                 logger.error(f"Unexpected error during GCP instance creation/wait: {e}", exc_info=True); return False
+                logger.error(f"Unexpected error during GCP instance creation/wait: {e}", exc_info=True); return False
 
 
             # --- Firewall Rule for SSH ---
@@ -1725,30 +1628,30 @@ class AIDevOpsAutomator:
                 logger.info(f"Ensuring firewall rule '{ssh_rule_name}' allowing SSH to tag '{target_tag}'...")
                 # Check if rule exists first (optional but good practice)
                 try:
-                     firewall_client.get(project=project_id, firewall=ssh_rule_name)
-                     logger.info(f"Firewall rule '{ssh_rule_name}' already exists.")
+                    firewall_client.get(project=project_id, firewall=ssh_rule_name)
+                    logger.info(f"Firewall rule '{ssh_rule_name}' already exists.")
                 except google_exceptions.NotFound:
-                     logger.info(f"Firewall rule '{ssh_rule_name}' not found. Creating...")
-                     fw_op = firewall_client.insert(project=project_id, firewall_resource=ssh_rule)
-                     # Wait briefly for firewall rule operation (usually faster than instances)
-                     # We can use GlobalOperationsClient here
-                     global_op_client = compute_v1.GlobalOperationsClient(credentials=credentials)
-                     start_time = time.time()
-                     fw_timeout = 60
-                     while time.time() - start_time < fw_timeout:
-                         fw_op_result = global_op_client.get(project=project_id, operation=fw_op.name)
-                         if fw_op_result.status == compute_v1.Operation.Status.DONE:
-                              if fw_op_result.error:
-                                   raise google_exceptions.GoogleAPICallError(f"Firewall rule creation failed: {fw_op_result.error}")
-                              logger.info(f"Firewall rule '{ssh_rule_name}' created successfully.")
-                              break
-                         time.sleep(5)
-                     else:
-                          logger.warning(f"Timeout waiting for firewall rule '{ssh_rule_name}' creation.")
+                    logger.info(f"Firewall rule '{ssh_rule_name}' not found. Creating...")
+                    fw_op = firewall_client.insert(project=project_id, firewall_resource=ssh_rule)
+                    # Wait briefly for firewall rule operation (usually faster than instances)
+                    # We can use GlobalOperationsClient here
+                    global_op_client = compute_v1.GlobalOperationsClient(credentials=credentials)
+                    start_time = time.time()
+                    fw_timeout = 60
+                    while time.time() - start_time < fw_timeout:
+                        fw_op_result = global_op_client.get(project=project_id, operation=fw_op.name)
+                        if fw_op_result.status == compute_v1.Operation.Status.DONE:
+                            if fw_op_result.error:
+                                raise google_exceptions.GoogleAPICallError(f"Firewall rule creation failed: {fw_op_result.error}")
+                            logger.info(f"Firewall rule '{ssh_rule_name}' created successfully.")
+                            break
+                        time.sleep(5)
+                    else:
+                        logger.warning(f"Timeout waiting for firewall rule '{ssh_rule_name}' creation.")
             except google_exceptions.Conflict:
-                 logger.info(f"Firewall rule '{ssh_rule_name}' likely created concurrently or already exists (caught conflict).")
+                logger.info(f"Firewall rule '{ssh_rule_name}' likely created concurrently or already exists (caught conflict).")
             except Exception as fw_e:
-                 logger.warning(f"Could not ensure SSH firewall rule '{ssh_rule_name}': {fw_e}") # Warn but proceed
+                logger.warning(f"Could not ensure SSH firewall rule '{ssh_rule_name}': {fw_e}") # Warn but proceed
 
             return True # VM creation itself was successful
 
@@ -1756,14 +1659,13 @@ class AIDevOpsAutomator:
             logger.error(f"Unexpected error during GCP VM setup: {e}", exc_info=True)
             return False
         finally:
-             # Cleanup generated SSH key temp dir
-             if key_temp_dir and os.path.exists(key_temp_dir):
-                  try: shutil.rmtree(key_temp_dir, onerror=remove_readonly)
-                  except Exception as cleanup_e: logger.warning(f"Could not cleanup temp key directory {key_temp_dir}: {cleanup_e}")
-             # Clear paths even if cleanup failed directory removal
-             self.ssh_key_paths = {}
+            # Cleanup generated SSH key temp dir
+            if key_temp_dir and os.path.exists(key_temp_dir):
+                try: shutil.rmtree(key_temp_dir, onerror=remove_readonly)
+                except Exception as cleanup_e: logger.warning(f"Could not cleanup temp key directory {key_temp_dir}: {cleanup_e}")
+            # Clear paths even if cleanup failed directory removal
+            self.ssh_key_paths = {}
 
-    # --- CI/CD Generation (Keep as internal helper) ---
     def generate_cicd_config(self) -> bool:
         logger.info("Attempting to generate CI/CD pipeline configuration via LLM...")
         if not self.openai_client:
@@ -1788,16 +1690,16 @@ class AIDevOpsAutomator:
             logger.info(f"Targeting {self.ci_platform}, path in repo: {target_ci_path_in_repo}")
         else:
              # Fallback for unknown hosts or when using local clone method
-             self.ci_platform = "GitHub Actions" # Default assumption
-             target_ci_path_in_repo = '.github/workflows/ai-devops-cicd.yml'
-             if self.repo_path: # If we have a local clone path
-                  workflow_dir = os.path.join(self.repo_path, '.github', 'workflows')
-                  os.makedirs(workflow_dir, exist_ok=True)
-                  local_save_path = os.path.join(workflow_dir, 'ai-devops-cicd.yml')
-                  logger.warning(f"Unknown Git host or using local clone. Defaulting to {self.ci_platform} format. Will save locally to: {local_save_path}")
-             else:
-                  logger.error("Cannot determine local save path for CI/CD config as local repo path is not set.")
-                  return False
+            self.ci_platform = "GitHub Actions" # Default assumption
+            target_ci_path_in_repo = '.github/workflows/ai-devops-cicd.yml'
+            if self.repo_path: # If we have a local clone path
+                workflow_dir = os.path.join(self.repo_path, '.github', 'workflows')
+                os.makedirs(workflow_dir, exist_ok=True)
+                local_save_path = os.path.join(workflow_dir, 'ai-devops-cicd.yml')
+                logger.warning(f"Unknown Git host or using local clone. Defaulting to {self.ci_platform} format. Will save locally to: {local_save_path}")
+            else:
+                logger.error("Cannot determine local save path for CI/CD config as local repo path is not set.")
+                return False
 
         if not target_ci_path_in_repo: # Should be set by logic above
             logger.error("Could not determine CI/CD output file path within the repository."); return False
@@ -1824,8 +1726,7 @@ class AIDevOpsAutomator:
         resource_details_for_llm.setdefault('admin_username', 'YOUR_SSH_USER') # Check both common keys
         resource_details_for_llm.setdefault('id', 'unknown-id')
         resource_details_for_llm.setdefault('name', 'unknown-name')
-        # Add other type-specific defaults if needed for the prompt
-
+        
         # --- Construct the LLM Prompt ---
         prompt = f"""
         Generate a CI/CD pipeline configuration in YAML format for {self.ci_platform}.
@@ -1875,29 +1776,27 @@ class AIDevOpsAutomator:
             generated_text = response.choices[0].message.content
             logger.debug("LLM Raw Response received for CI/CD config.")
 
-            # --- Extract YAML Content ---
-            # More robust YAML extraction
             yaml_content = None
             if "```yaml" in generated_text:
-                 start = generated_text.find("```yaml") + len("```yaml")
-                 end = generated_text.find("```", start)
-                 if end != -1:
-                      yaml_content = generated_text[start:end].strip()
-                 else: # Handle case where closing ``` is missing
-                      yaml_content = generated_text[start:].strip()
+                start = generated_text.find("```yaml") + len("```yaml")
+                end = generated_text.find("```", start)
+                if end != -1:
+                    yaml_content = generated_text[start:end].strip()
+                else: # Handle case where closing ``` is missing
+                    yaml_content = generated_text[start:].strip()
             elif "```" in generated_text: # Handle cases with just ```
-                 start = generated_text.find("```") + len("```")
-                 end = generated_text.find("```", start)
-                 if end != -1:
-                      yaml_content = generated_text[start:end].strip()
-                 else:
-                      yaml_content = generated_text[start:].strip()
+                start = generated_text.find("```") + len("```")
+                end = generated_text.find("```", start)
+                if end != -1:
+                    yaml_content = generated_text[start:end].strip()
+                else:
+                    yaml_content = generated_text[start:].strip()
             else:
                  # Assume the whole response is YAML if no backticks
-                 yaml_content = generated_text.strip()
-                 # Basic sanity check for likely YAML start
-                 if not any(yaml_content.startswith(kw) for kw in ['name:', 'on:', 'jobs:', 'stages:', 'image:', 'pipelines:']):
-                      logger.warning("LLM response did not contain YAML markers and doesn't start with common keywords. Attempting to parse anyway.")
+                yaml_content = generated_text.strip()
+                # Basic sanity check for likely YAML start
+                if not any(yaml_content.startswith(kw) for kw in ['name:', 'on:', 'jobs:', 'stages:', 'image:', 'pipelines:']):
+                    logger.warning("LLM response did not contain YAML markers and doesn't start with common keywords. Attempting to parse anyway.")
 
 
             if not yaml_content:
@@ -1925,13 +1824,13 @@ class AIDevOpsAutomator:
                     logger.error("Failed to commit automated CI/CD config via API. Saving locally as fallback if possible.")
                     # Fallback to local save if API commit fails and local path exists
                     if local_save_path:
-                         try:
-                              with open(local_save_path, 'w') as f: f.write(yaml_content)
-                              logger.info(f"CI/CD configuration saved locally as fallback to: {local_save_path}")
-                              self._add_keys_to_gitignore_local()
-                         except Exception as e:
-                              logger.error(f"Failed to save CI/CD config locally even as fallback: {e}")
-                              return False # Both API and local save failed
+                        try:
+                            with open(local_save_path, 'w') as f: f.write(yaml_content)
+                            logger.info(f"CI/CD configuration saved locally as fallback to: {local_save_path}")
+                            self._add_keys_to_gitignore_local()
+                        except Exception as e:
+                            logger.error(f"Failed to save CI/CD config locally even as fallback: {e}")
+                            return False # Both API and local save failed
                     else:
                          return False # API commit failed, no local path to save to
             elif local_save_path:
@@ -1973,9 +1872,9 @@ class AIDevOpsAutomator:
                         logger.info(f"Secret '{ssh_secret_name}' not found. Proceeding to create it.")
                     except GithubException as ge:
                          if ge.status == 404: # Expected if secret doesn't exist
-                              logger.info(f"Secret '{ssh_secret_name}' not found (via check). Proceeding to create it.")
+                            logger.info(f"Secret '{ssh_secret_name}' not found (via check). Proceeding to create it.")
                          else:
-                              logger.warning(f"Could not check for existing secret '{ssh_secret_name}': {ge}. Attempting creation anyway.")
+                            logger.warning(f"Could not check for existing secret '{ssh_secret_name}': {ge}. Attempting creation anyway.")
 
                     if not secret_exists:
                         # Get the repository's public key for encryption
@@ -2010,7 +1909,7 @@ class AIDevOpsAutomator:
                         )
                         # Check response status (expect 201 Created or 204 No Content on update)
                         if put_response[0] not in [201, 204]:
-                             raise GithubException(put_response[0], put_response[1], headers=put_response[2])
+                            raise GithubException(put_response[0], put_response[1], headers=put_response[2])
 
                         logger.info(f"Successfully set '{ssh_secret_name}' secret via GitHub API.")
                         self.ssh_key_secret_set = True
@@ -2028,11 +1927,11 @@ class AIDevOpsAutomator:
                     self.ssh_key_secret_set = False
             elif is_vm_like:
                  if not self.is_github_repo or not self.github_client:
-                      logger.info("Skipping automatic secret setup: Not using GitHub API.")
+                    logger.info("Skipping automatic secret setup: Not using GitHub API.")
                  elif not private_key_for_secret:
-                      logger.info(f"Skipping automatic secret setup: Using existing resource or key generation failed. Set '{ssh_secret_name}' manually.")
+                    logger.info(f"Skipping automatic secret setup: Using existing resource or key generation failed. Set '{ssh_secret_name}' manually.")
             else:
-                 logger.info(f"Target type '{target_type}' does not require SSH key secret. Skipping automatic setup.")
+                logger.info(f"Target type '{target_type}' does not require SSH key secret. Skipping automatic setup.")
 
             return True
 
@@ -2041,7 +1940,6 @@ class AIDevOpsAutomator:
         except openai.RateLimitError as e: logger.error(f"OpenAI Rate Limit Error: {e}"); return False
         except Exception as e: logger.error(f"LLM interaction error: {e}", exc_info=True); return False
 
-    # --- Git Commit Helpers (Keep as is) ---
     def _commit_file_via_api(self, file_path: str, content: str, message: str) -> bool:
         """Commits a file to the GitHub repository using the API."""
         if not self.is_github_repo or not self.github_client or not self.repo_object:
@@ -2050,16 +1948,9 @@ class AIDevOpsAutomator:
 
         logger.info(f"Attempting to commit file '{file_path}' via GitHub API...")
         try:
-            # Determine current default branch (usually main or master)
-            # branch_name = self.repo_object.default_branch # Use default branch
-            # NOTE: PyGithub doesn't directly expose default branch easily without extra API call sometimes.
-            # Assume 'main' or allow specifying, or commit to current head implicitly?
-            # For create/update_file, omitting branch usually defaults to the repo's default branch.
-
-            # Ensure content is string
             if isinstance(content, bytes):
-                 content = content.decode('utf-8')
-
+                content = content.decode('utf-8')
+                
             try:
                 # Check if file exists to update it, otherwise create it
                 existing_file = self.repo_object.get_contents(file_path) # add ref=branch_name?
@@ -2097,7 +1988,7 @@ class AIDevOpsAutomator:
         except Exception as e:
             logger.error(f"Unexpected error committing file via API: {e}", exc_info=True)
             return False
-
+    
     def _add_keys_to_gitignore_local(self):
         """Adds generated SSH key filename to .gitignore in the local repo path."""
         if not self.repo_path or not os.path.isdir(self.repo_path):
@@ -2137,7 +2028,6 @@ class AIDevOpsAutomator:
         except Exception as e:
             logger.warning(f"Could not update local .gitignore: {e}")
 
-
     def commit_and_push_local_changes(self) -> bool:
         """Commits and pushes changes from the local temporary repo."""
         if not self.repo_path or not os.path.isdir(self.repo_path):
@@ -2167,9 +2057,6 @@ class AIDevOpsAutomator:
             try:
                 remote = repo.remote(name=remote_name)
                 logger.info(f"Pushing local changes to remote '{remote_name}'...")
-                # GitPython uses configured credentials (SSH agent, git credential helper)
-                # For HTTPS with token, the clone URL should have included it,
-                # but push might require helper setup if token not cached.
                 push_infos = remote.push()
 
                 # Check push results for errors
@@ -2179,27 +2066,25 @@ class AIDevOpsAutomator:
                         logger.error(f"Push failed for ref '{info.local_ref}': {info.summary}")
                         push_failed = True
                 if not push_failed:
-                     pushed = True
-                     logger.info("Local push successful.")
+                    pushed = True
+                    logger.info("Local push successful.")
                 else:
-                     logger.error("Local push failed. Check remote permissions and upstream status.")
+                    logger.error("Local push failed. Check remote permissions and upstream status.")
 
             except GitCommandError as pe:
                 stderr = pe.stderr.strip()
                 logger.error(f"Git push command failed: {stderr}")
                 if "Authentication failed" in stderr:
-                     logger.error("Authentication failed for push. Ensure SSH key/token is configured correctly for push access.")
+                    logger.error("Authentication failed for push. Ensure SSH key/token is configured correctly for push access.")
                 pushed = False
             except ValueError: # Remote 'origin' not found
                 logger.error(f"Remote '{remote_name}' not found in the local repository. Cannot push.")
                 pushed = False
             except Exception as push_e:
-                 logger.error(f"An unexpected error occurred during push: {push_e}")
-                 pushed = False
+                logger.error(f"An unexpected error occurred during push: {push_e}")
+                pushed = False
 
             self.commit_pushed = pushed
-            # Return True because commit succeeded, even if push failed.
-            # The commit_pushed status indicates push success/failure.
             return True
 
         except GitCommandError as e:
@@ -2209,8 +2094,6 @@ class AIDevOpsAutomator:
             logger.error(f"Unexpected local commit/push error: {e}", exc_info=True)
             return False
 
-
-    # --- Setup Instructions (Keep as is) ---
     def generate_setup_instructions(self) -> str:
         """Generates instructions focusing on CI/CD setup and manual fallbacks."""
         instructions = ["# AI DevOps Setup & Deployment Instructions\n"]
@@ -2237,34 +2120,34 @@ class AIDevOpsAutomator:
 
         if self.ci_platform:
             commit_status = "automatically committed to your repository via API" if self.commit_pushed and self.is_github_repo else \
-                           "committed and pushed from local clone" if self.commit_pushed and not self.is_github_repo else \
-                           "generated locally (manual commit/push needed)"
+                            "committed and pushed from local clone" if self.commit_pushed and not self.is_github_repo else \
+                            "generated locally (manual commit/push needed)"
             instructions.append(f"- A basic {self.ci_platform} pipeline configuration (`{ci_file_path_display}`) was generated and {commit_status}.")
 
             if is_vm_like:
-                 instructions.append(f"  - **Goal:** This pipeline aims to **automatically deploy** your application to the target server ({target_type}) on pushes to the main/master branch.")
-                 instructions.append(f"  - **ACTION REQUIRED for Automation:** For automatic deployment to work, you **MUST** configure the `{ssh_secret_name}` secret in your CI/CD provider settings (e.g., GitHub Repository Secrets).")
-                 instructions.append(f"    - The value of this secret must be the **entire content** of the private SSH key (`.pem` file) required to access the server.")
+                instructions.append(f"  - **Goal:** This pipeline aims to **automatically deploy** your application to the target server ({target_type}) on pushes to the main/master branch.")
+                instructions.append(f"  - **ACTION REQUIRED for Automation:** For automatic deployment to work, you **MUST** configure the `{ssh_secret_name}` secret in your CI/CD provider settings (e.g., GitHub Repository Secrets).")
+                instructions.append(f"    - The value of this secret must be the **entire content** of the private SSH key (`.pem` file) required to access the server.")
 
-                 # Report on automatic secret setting attempt
-                 if self.is_github_repo and is_vm_like: # Check if script *should* have tried (GitHub + VM)
-                      if self.ssh_key_secret_set:
-                           instructions.append(f"    - ✅ The script **successfully attempted** to set the `{ssh_secret_name}` secret automatically via the GitHub API.")
-                           instructions.append(f"       Verify this secret in your repository's Settings > Secrets and variables > Actions.")
-                      else:
-                           # Explain why it might have failed
-                           reason = "possible reasons: PyNaCl library not installed, PAT lacks 'secrets' permissions, API error, or secret already existed." if self.ssh_key_paths.get('private') else "automatic setup skipped as an existing VM was selected or key generation failed."
-                           instructions.append(f"    - ⚠️ The script **could not** automatically set the `{ssh_secret_name}` secret ({reason}).")
-                           instructions.append(f"    - **You MUST set the `{ssh_secret_name}` secret manually.**")
-                 elif is_vm_like: # VM-like target, but not GitHub or other issue
-                      instructions.append(f"    - **You MUST set the `{ssh_secret_name}` secret manually.**")
+                # Report on automatic secret setting attempt
+                if self.is_github_repo and is_vm_like: # Check if script *should* have tried (GitHub + VM)
+                    if self.ssh_key_secret_set:
+                        instructions.append(f"    - ✅ The script **successfully attempted** to set the `{ssh_secret_name}` secret automatically via the GitHub API.")
+                        instructions.append(f"       Verify this secret in your repository's Settings > Secrets and variables > Actions.")
+                    else:
+                        # Explain why it might have failed
+                        reason = "possible reasons: PyNaCl library not installed, PAT lacks 'secrets' permissions, API error, or secret already existed." if self.ssh_key_paths.get('private') else "automatic setup skipped as an existing VM was selected or key generation failed."
+                        instructions.append(f"    - ⚠️ The script **could not** automatically set the `{ssh_secret_name}` secret ({reason}).")
+                        instructions.append(f"    - **You MUST set the `{ssh_secret_name}` secret manually.**")
+                elif is_vm_like: # VM-like target, but not GitHub or other issue
+                    instructions.append(f"    - **You MUST set the `{ssh_secret_name}` secret manually.**")
 
             else: # Not a VM-like target
-                 instructions.append(f"  - This pipeline is configured for the `{target_type}` target. Deployment steps may involve different commands (e.g., `aws lambda update-function-code`, `az webapp deploy`). Review the generated YAML (`{ci_file_path_display}`).")
-                 instructions.append(f"  - **Secrets Required:** Depending on the generated pipeline, you might need to configure secrets for cloud provider authentication (e.g., `AWS_ACCESS_KEY_ID`, `AZURE_CREDENTIALS`) in your CI/CD platform.")
+                instructions.append(f"  - This pipeline is configured for the `{target_type}` target. Deployment steps may involve different commands (e.g., `aws lambda update-function-code`, `az webapp deploy`). Review the generated YAML (`{ci_file_path_display}`).")
+                instructions.append(f"  - **Secrets Required:** Depending on the generated pipeline, you might need to configure secrets for cloud provider authentication (e.g., `AWS_ACCESS_KEY_ID`, `AZURE_CREDENTIALS`) in your CI/CD platform.")
 
         else:
-             instructions.append("- CI/CD configuration generation was skipped or failed.")
+            instructions.append("- CI/CD configuration generation was skipped or failed.")
 
         if not self.commit_pushed and self.ci_platform and not self.is_github_repo: # Changes generated locally but not pushed
             instructions.append(f"- **Manual Action:** Since changes were not automatically pushed, manually review, commit, and push the generated CI/CD file (`{ci_file_path_display}`) and any `.gitignore` changes from the temporary local clone (if it wasn't cleaned up).")
@@ -2298,9 +2181,9 @@ class AIDevOpsAutomator:
                 key_name_in_cloud = resource_info.get('key_pair_name', self.ssh_key_paths.get('key_name', 'N/A')) # Get name used in cloud
                 instructions.append(f"  - **Key Name Reference:** `{key_name_in_cloud}` (This name might be used in the cloud provider console).")
                 if key_content:
-                     instructions.append(f"  - **Use the private key content above** when setting the `{ssh_secret_name}` secret in your CI/CD platform.")
+                    instructions.append(f"  - **Use the private key content above** when setting the `{ssh_secret_name}` secret in your CI/CD platform.")
                 else:
-                     instructions.append(f"  - **Cannot display private key content.** You will need to regenerate or manually configure access if you didn't save it.")
+                    instructions.append(f"  - **Cannot display private key content.** You will need to regenerate or manually configure access if you didn't save it.")
 
             else: # Existing VM was selected OR key wasn't generated/found by this script run
                 instructions.append("\n## 2. SSH Key Details (Existing VM / Manual Key)")
@@ -2316,7 +2199,7 @@ class AIDevOpsAutomator:
         instructions.append("\n### 3.1 Automated Deployment (Recommended)")
         instructions.append(f"1.  **Ensure Secrets are Set:** Verify the required secrets (`{ssh_secret_name}` for VMs, possibly cloud credentials for other types) are configured in your CI/CD platform (e.g., GitHub Actions secrets). See Section 1 & 2.")
         if not self.commit_pushed and self.ci_platform:
-                     instructions.append(f"2.  **Push Changes:** Manually commit and push the CI/CD configuration file (`{ci_file_path_display}`) and any other necessary changes (like `.gitignore`) to your `main` or `master` branch.")
+            instructions.append(f"2.  **Push Changes:** Manually commit and push the CI/CD configuration file (`{ci_file_path_display}`) and any other necessary changes (like `.gitignore`) to your `main` or `master` branch.")
         else:
             instructions.append(f"2.  **Trigger Pipeline:** Push a commit to your `main` or `master` branch.")
         instructions.append(f"3.  **Monitor Pipeline:** Check the execution status and logs in your {self.ci_platform} interface.")
@@ -2330,11 +2213,11 @@ class AIDevOpsAutomator:
 
             # Validate IP and User before showing commands
             if public_ip == 'N/A' or public_ip == 'YOUR_SERVER_IP' or not public_ip:
-                 instructions.append("- ⚠️ Could not determine the Public IP address. Find it in your cloud provider console.")
-                 public_ip = "YOUR_SERVER_IP" # Reset placeholder
+                instructions.append("- ⚠️ Could not determine the Public IP address. Find it in your cloud provider console.")
+                public_ip = "YOUR_SERVER_IP" # Reset placeholder
             if ssh_user == 'N/A' or ssh_user == 'YOUR_SSH_USER' or not ssh_user:
-                 instructions.append("- ⚠️ Could not determine the SSH username. Common defaults: `ubuntu` (Ubuntu), `ec2-user` (Amazon Linux), `azureuser` (Azure), `gcpuser` (GCP). Find the correct one for your VM.")
-                 ssh_user = "YOUR_SSH_USER" # Reset placeholder
+                instructions.append("- ⚠️ Could not determine the SSH username. Common defaults: `ubuntu` (Ubuntu), `ec2-user` (Amazon Linux), `azureuser` (Azure), `gcpuser` (GCP). Find the correct one for your VM.")
+                ssh_user = "YOUR_SSH_USER" # Reset placeholder
 
             instructions.append(f"1.  **Locate Private Key:** You need the private key file corresponding to the VM. If generated by this script, you should have saved its content (see Section 2). If existing, use your key file: `{private_key_path_display}`.")
             instructions.append(f"2.  **Save Key Content:** If generated by the script, save the private key content shown in Section 2 to a local file (e.g., `~/.ssh/ai_devops_key.pem`).")
@@ -2355,24 +2238,23 @@ class AIDevOpsAutomator:
         # --- Section 4: Next Steps ---
         instructions.append("\n## 4. Next Steps & Troubleshooting")
         if is_vm_like:
-             instructions.append("- **Create `deploy.sh` on Server:** If it doesn't exist, create `~/deploy.sh` on the target VM (`" + resource_name_display + "`). This script should handle:")
-             instructions.append("  - Unpacking the artifact (e.g., `unzip -o ~/app.zip -d /opt/myapp`)")
-             instructions.append("  - Navigating to the app directory (`cd /opt/myapp`)")
-             instructions.append("  - Installing/updating dependencies (e.g., `npm ci --production`, `pip install -r requirements.txt`)")
-             instructions.append("  - Building if necessary (e.g., `npm run build`)")
-             instructions.append("  - Restarting your application (e.g., using `pm2`, `systemd`, `docker-compose` etc.)")
-             instructions.append("  - Example basic `deploy.sh` structure:")
-             instructions.append("    ```bash\n    #!/bin/bash\n    set -e # Exit on error\n    APP_DIR=\"/opt/myapp\"\n    ARTIFACT=\"~/app.zip\"\n    echo \"Deploying artifact $ARTIFACT to $APP_DIR...\"\n    mkdir -p $APP_DIR\n    unzip -o $ARTIFACT -d $APP_DIR\n    cd $APP_DIR\n    echo \"Installing dependencies...\"\n    # Add install command based on stack (npm, pip, etc.)\n    # npm ci --production\n    # pip install -r requirements.txt\n    echo \"Restarting application...\"\n    # Add restart command (pm2 reload myapp, systemctl restart myservice, etc.)\n    echo \"Deployment complete.\"\n    ```")
+            instructions.append("- **Create `deploy.sh` on Server:** If it doesn't exist, create `~/deploy.sh` on the target VM (`" + resource_name_display + "`). This script should handle:")
+            instructions.append("  - Unpacking the artifact (e.g., `unzip -o ~/app.zip -d /opt/myapp`)")
+            instructions.append("  - Navigating to the app directory (`cd /opt/myapp`)")
+            instructions.append("  - Installing/updating dependencies (e.g., `npm ci --production`, `pip install -r requirements.txt`)")
+            instructions.append("  - Building if necessary (e.g., `npm run build`)")
+            instructions.append("  - Restarting your application (e.g., using `pm2`, `systemd`, `docker-compose` etc.)")
+            instructions.append("  - Example basic `deploy.sh` structure:")
+            instructions.append("    ```bash\n    #!/bin/bash\n    set -e # Exit on error\n    APP_DIR=\"/opt/myapp\"\n    ARTIFACT=\"~/app.zip\"\n    echo \"Deploying artifact $ARTIFACT to $APP_DIR...\"\n    mkdir -p $APP_DIR\n    unzip -o $ARTIFACT -d $APP_DIR\n    cd $APP_DIR\n    echo \"Installing dependencies...\"\n    # Add install command based on stack (npm, pip, etc.)\n    # npm ci --production\n    # pip install -r requirements.txt\n    echo \"Restarting application...\"\n    # Add restart command (pm2 reload myapp, systemctl restart myservice, etc.)\n    echo \"Deployment complete.\"\n    ```")
         instructions.append("- **Check Pipeline Logs:** Carefully review the CI/CD pipeline logs in {self.ci_platform} for errors.")
         if is_vm_like:
-             instructions.append("- **Check Server Logs:** If deployment runs but the app fails, check application logs (e.g., in `/var/log`, `journalctl`, or `pm2 logs`) and web server logs (nginx/apache) on the VM.")
+            instructions.append("- **Check Server Logs:** If deployment runs but the app fails, check application logs (e.g., in `/var/log`, `journalctl`, or `pm2 logs`) and web server logs (nginx/apache) on the VM.")
         else:
-             instructions.append(f"- **Check Cloud Service Logs:** Review logs for the specific cloud service ({target_type}) in the {self.cloud_provider.upper()} console.")
+            instructions.append(f"- **Check Cloud Service Logs:** Review logs for the specific cloud service ({target_type}) in the {self.cloud_provider.upper()} console.")
         instructions.append(f"- **Consult Documentation:** Review {self.ci_platform} docs and {self.cloud_provider.upper()} {target_type} deployment documentation if the generated pipeline needs adjustments.")
 
         return "\n".join(instructions)
-
-    # --- Cleanup Method ---
+    
     def cleanup(self):
         """Cleans up temporary resources like cloned repos and generated keys."""
         # Clean up local repo clone first
@@ -2387,7 +2269,7 @@ class AIDevOpsAutomator:
                 logger.error(f"Error removing temporary repo directory {self.repo_path}: {e}")
             finally:
                  # Ensure path is cleared from state even if deletion failed
-                 self.repo_path = None
+                self.repo_path = None
         else:
             logger.debug("Skipping repo cleanup: No temporary local repository path set or dir not found.")
 
@@ -2404,15 +2286,8 @@ class AIDevOpsAutomator:
             finally:
                 self.ssh_key_paths = {}
         else:
-             logger.debug("Skipping key cleanup: No temporary key directory recorded or dir not found.")
+            logger.debug("Skipping key cleanup: No temporary key directory recorded or dir not found.")
 
-        # Reset other state variables? Maybe not necessary if a new instance is created per session.
-        # self.repo_url = None
-        # self.git_token = None
-        # self.cloud_provider = None
-        # ... etc.
-
-    # --- Main Workflow Execution ---
     def execute_workflow(self) -> Tuple[bool, str]:
         """
         Runs the main workflow steps after configuration is set.
@@ -2434,9 +2309,9 @@ class AIDevOpsAutomator:
                 logger.info("Stack not detected yet. Running detection step first...")
                 if not self.access_repository_and_detect_stack():
                      # Cleanup might have occurred in access_repo method on failure
-                     return False, "Failed to access repository or detect stack before main execution."
+                    return False, "Failed to access repository or detect stack before main execution."
                 if not self.detected_stack or self.detected_stack == 'unknown':
-                     logger.warning("Stack detection ran, but result is unknown. CI/CD generation might be inaccurate.")
+                    logger.warning("Stack detection ran, but result is unknown. CI/CD generation might be inaccurate.")
                      # Proceed, but with caution.
 
             logger.info(f"Workflow starting with: Repo={self.repo_url}, Provider={self.cloud_provider}, Stack={self.detected_stack}, Target={self.resource_configuration.get('type')}, CreateNew={self.resource_configuration.get('create_new')}")
@@ -2490,11 +2365,11 @@ class AIDevOpsAutomator:
             # --- Step 2: Generate CI/CD Config ---
             logger.info("Executing Step: Generate CI/CD configuration...")
             if not self.generate_cicd_config():
-                 # generate_cicd_config handles API commit or local save attempts
-                 # and sets self.commit_pushed if API commit succeeds
-                 logger.error("Failed to generate and save/commit CI/CD configuration.")
-                 # Don't cleanup here
-                 return False, "Failed to generate or commit CI/CD configuration."
+                # generate_cicd_config handles API commit or local save attempts
+                # and sets self.commit_pushed if API commit succeeds
+                logger.error("Failed to generate and save/commit CI/CD configuration.")
+                # Don't cleanup here
+                return False, "Failed to generate or commit CI/CD configuration."
             logger.info("CI/CD configuration generated and saved/committed.")
 
 
@@ -2502,15 +2377,15 @@ class AIDevOpsAutomator:
             should_push_local = not (self.is_github_repo and self.commit_pushed)
             # Also check if local repo path exists (meaning clone method was used)
             if should_push_local and self.repo_path and os.path.isdir(self.repo_path):
-                 logger.info("Executing Step: Commit and push local changes...")
-                 if not self.commit_and_push_local_changes():
-                      # commit_and_push sets self.commit_pushed
-                      logger.warning("Failed to commit or push local changes. Instructions will indicate manual steps needed.")
-                      # Proceed to generate instructions, but push status is known via self.commit_pushed
-                 else:
-                     logger.info("Local changes committed and pushed successfully (if any changes were detected).")
+                logger.info("Executing Step: Commit and push local changes...")
+                if not self.commit_and_push_local_changes():
+                    # commit_and_push sets self.commit_pushed
+                    logger.warning("Failed to commit or push local changes. Instructions will indicate manual steps needed.")
+                    # Proceed to generate instructions, but push status is known via self.commit_pushed
+                else:
+                    logger.info("Local changes committed and pushed successfully (if any changes were detected).")
             elif should_push_local:
-                 logger.debug("Skipping local commit/push step: Not using GitHub API commit, but no local repo path available.")
+                logger.debug("Skipping local commit/push step: Not using GitHub API commit, but no local repo path available.")
 
 
             # --- Step 4: Generate Final Instructions ---
@@ -2524,26 +2399,21 @@ class AIDevOpsAutomator:
             return success, final_result
 
         except Exception as e:
-             logger.error(f"An unexpected error occurred in the main workflow: {e}", exc_info=True)
-             # Cleanup happens in finally block
-             return False, f"An unexpected error occurred during workflow execution: {e}"
+            logger.error(f"An unexpected error occurred in the main workflow: {e}", exc_info=True)
+            # Cleanup happens in finally block
+            return False, f"An unexpected error occurred during workflow execution: {e}"
         finally:
-             # Final cleanup, regardless of success/failure within try block
-             logger.info("Executing final cleanup...")
-             self.cleanup()
-             logger.info("Cleanup finished.")
-# --- END OF AIDevOpsAutomator CLASS ---
-
-
-# --- FastAPI Application Setup ---
+            # Final cleanup, regardless of success/failure within try block
+            logger.info("Executing final cleanup...")
+            self.cleanup()
+            logger.info("Cleanup finished.")
+            
 app = FastAPI(
     title="AI DevOps Automator API",
     description="API to automate Git repo analysis, cloud resource provisioning, and CI/CD setup.",
     version="0.1.0",
-)
+)   
 
-# --- CORS Middleware ---
-# Allow all origins for development, restrict in production
 origins = [
     "http://localhost",
     "http://localhost:3000", # Common React dev port
@@ -2551,6 +2421,7 @@ origins = [
     "http://127.0.0.1:3000",
     # Add deployed frontend URL in production
 ]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -2559,12 +2430,7 @@ app.add_middleware(
     allow_headers=["*"], # Allows all headers
 )
 
-# --- In-Memory Session Storage ---
-# WARNING: Not suitable for production! Use Redis, DB, etc. for real applications.
-# WARNING: Stores Automator instances, which might hold sensitive data temporarily.
 sessions: Dict[str, AIDevOpsAutomator] = {}
-
-# --- Pydantic Models for Requests/Responses ---
 
 class StartResponse(BaseModel):
     session_id: str
@@ -2592,14 +2458,7 @@ class CloudInfoRequest(BaseModel):
         {"type": "service_principal", "tenant_id": "...", "client_id": "...", "client_secret": "...", "subscription_id": "..."},
         {"type": "application_default", "project_id": "my-gcp-project"},
     ])
-
-    # Optional: Add validators for credentials based on provider/type if needed
-    # @validator('credentials')
-    # def check_credentials(cls, v, values):
-    #     provider = values.get('provider')
-    #     # Add validation logic here...
-    #     return v
-
+    
 class ResourceConfigRequest(BaseModel):
     # Keep config flexible, add examples
     config: Dict[str, Any] = Field(..., examples=[
@@ -2610,8 +2469,8 @@ class ResourceConfigRequest(BaseModel):
 
 class ExecuteResponse(BaseModel):
     success: bool
-    result: str # Contains instructions on success, error message on failure
-
+    result: str
+    
 # --- Helper Function to Get Session ---
 def get_session(session_id: str) -> AIDevOpsAutomator:
     """Retrieves the automator instance for a given session ID."""
@@ -2622,7 +2481,6 @@ def get_session(session_id: str) -> AIDevOpsAutomator:
     return automator
 
 # --- API Endpoints ---
-
 @app.post("/workflow/start", response_model=StartResponse, tags=["Workflow"])
 async def start_workflow():
     """Initiates a new workflow session."""
@@ -2635,7 +2493,6 @@ async def start_workflow():
         api_logger.error(f"Failed to initialize AIDevOpsAutomator for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to initialize session: {e}")
     return StartResponse(session_id=session_id)
-
 
 @app.post("/workflow/{session_id}/git", response_model=StatusResponse, tags=["Workflow Configuration"])
 async def set_git_info(
@@ -2658,7 +2515,6 @@ async def set_git_info(
         api_logger.error(f"Error setting Git info for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error setting Git info: {e}")
 
-
 @app.post("/workflow/{session_id}/cloud", response_model=StatusResponse, tags=["Workflow Configuration"])
 async def set_cloud_info(
     session_id: str = Path(..., description="The unique ID for the workflow session"),
@@ -2680,9 +2536,6 @@ async def set_cloud_info(
         api_logger.error(f"Error setting Cloud info for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error setting Cloud info: {e}")
 
-
-# Inside main.py (FastAPI endpoints)
-
 @app.post("/workflow/{session_id}/resource", response_model=StatusResponse, tags=["Workflow Configuration"])
 async def set_resource_config(
     session_id: str = Path(..., description="The unique ID for the workflow session"),
@@ -2693,10 +2546,8 @@ async def set_resource_config(
     automator = get_session(session_id)
     if not automator.cloud_provider:
          # This log message matches what you see
-         api_logger.warning(f"Attempted to set resource config before cloud provider for session {session_id}")
-         raise HTTPException(status_code=400, detail="Cloud provider must be set before resource configuration.")
-    # <===============================
-
+        api_logger.warning(f"Attempted to set resource config before cloud provider for session {session_id}")
+        raise HTTPException(status_code=400, detail="Cloud provider must be set before resource configuration.")
     try:
         success = automator.set_resource_config(resource_req.config)
         if success:
@@ -2710,7 +2561,6 @@ async def set_resource_config(
         api_logger.error(f"Error setting resource config for session {session_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error setting resource config: {e}")
 
-
 @app.post("/workflow/{session_id}/execute", response_model=ExecuteResponse, tags=["Workflow Execution"])
 async def execute_workflow(
     session_id: str = Path(..., description="The unique ID for the workflow session")
@@ -2721,8 +2571,6 @@ async def execute_workflow(
     """
     api_logger.info(f"Received request to EXECUTE workflow for session: {session_id}")
     automator = get_session(session_id)
-
-    # --- Pre-execution checks ---
     if not automator.repo_url:
          raise HTTPException(status_code=400, detail="Git info not set for this session.")
     if not automator.cloud_provider:
@@ -2755,7 +2603,6 @@ async def execute_workflow(
             api_logger.error(f"Error during cleanup after execution error for session {session_id}: {cleanup_e}")
         raise HTTPException(status_code=500, detail=f"Internal server error during workflow execution: {e}")
 
-
 @app.delete("/workflow/{session_id}", response_model=StatusResponse, tags=["Workflow"])
 async def delete_workflow_session(
     session_id: str = Path(..., description="The unique ID for the workflow session to delete")
@@ -2787,8 +2634,6 @@ async def delete_workflow_session(
 async def read_root():
     return {"message": "AI DevOps Automator API is running."}
 
-
-# --- Uvicorn Entry Point (for running directly) ---
 if __name__ == "__main__":
     import uvicorn
     # Check for required libraries before starting server
@@ -2813,7 +2658,7 @@ if __name__ == "__main__":
     except ImportError: missing_libs.append("azure-mgmt-compute")
     try: import azure.mgmt.network
     except ImportError: missing_libs.append("azure-mgmt-network")
-    try: import google.cloud.compute_v1 # Check specific client
+    try: import google.cloud.compute_v1  
     except ImportError: missing_libs.append("google-cloud-compute")
     try: import google.auth
     except ImportError: missing_libs.append("google-auth")
@@ -2821,7 +2666,7 @@ if __name__ == "__main__":
     except ImportError: missing_libs.append("cryptography")
     try: import openai
     except ImportError: missing_libs.append("openai")
-    try: import github # Check PyGithub
+    try: import github  
     except ImportError: missing_libs.append("PyGithub")
     try: import nacl
     except ImportError: missing_libs.append("pynacl")
@@ -2834,6 +2679,5 @@ if __name__ == "__main__":
 
     print("Starting AI DevOps Automator API server...")
     print("Open http://127.0.0.1:8000/docs for API documentation.")
-    # Use reload=True for development
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
  
